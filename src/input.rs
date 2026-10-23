@@ -3,6 +3,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::ffi::{CStr, CString, c_char};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use sdl3_sys::everything::*;
@@ -12,9 +13,16 @@ use crate::Action;
 pub enum InputEvent {
     Action(Action),
     Notice(String),
+    /// Start + Select held: bring the launcher back over (or send it behind) a running game.
+    HomeCombo,
 }
 
+/// Set while a game runs: the pads are then only watched for the home combo, so polling slows down.
+pub static IN_GAME: AtomicBool = AtomicBool::new(false);
+
 const POLL_INTERVAL: Duration = Duration::from_millis(8);
+const IN_GAME_POLL_INTERVAL: Duration = Duration::from_millis(33);
+const COMBO_HOLD: Duration = Duration::from_secs(1);
 const REPEAT_DELAY: Duration = Duration::from_millis(380);
 const REPEAT_INTERVAL: Duration = Duration::from_millis(110);
 // Separate press/release thresholds stop a stick resting near the edge from chattering.
@@ -77,6 +85,7 @@ fn run(emit: impl Fn(InputEvent)) {
         triggers: HashSet::new(),
         gamepads: HashMap::new(),
         joysticks: HashMap::new(),
+        combos: HashMap::new(),
     };
     let mut event = SDL_Event::default();
     // SDL_WaitEvent re-polls open pads every ~1 ms, which costs real CPU with chatty
@@ -86,7 +95,12 @@ fn run(emit: impl Fn(InputEvent)) {
             pads.handle(&event);
         }
         pads.repeat_if_due();
-        std::thread::sleep(POLL_INTERVAL);
+        let interval = if IN_GAME.load(Ordering::Relaxed) {
+            IN_GAME_POLL_INTERVAL
+        } else {
+            POLL_INTERVAL
+        };
+        std::thread::sleep(interval);
     }
 }
 
@@ -117,6 +131,16 @@ struct Pads<F: Fn(InputEvent)> {
     triggers: HashSet<(u32, u8)>,
     /// Devices SDL has no gamepad mapping for, read as raw joysticks.
     joysticks: HashMap<u32, *mut SDL_Joystick>,
+    /// Per device: Select and Start held state, when both went down, and whether it already fired.
+    combos: HashMap<u32, Combo>,
+}
+
+#[derive(Default)]
+struct Combo {
+    select: bool,
+    start: bool,
+    since: Option<Instant>,
+    fired: bool,
 }
 
 impl<F: Fn(InputEvent)> Pads<F> {
@@ -147,6 +171,10 @@ impl<F: Fn(InputEvent)> Pads<F> {
             }
             SDL_EVENT_GAMEPAD_BUTTON_DOWN | SDL_EVENT_GAMEPAD_BUTTON_UP => {
                 let b = unsafe { event.gbutton };
+                let button = SDL_GamepadButton(b.button as i32);
+                if button == SDL_GAMEPAD_BUTTON_BACK || button == SDL_GAMEPAD_BUTTON_START {
+                    self.combo_button(b.which.0, button == SDL_GAMEPAD_BUTTON_START, b.down);
+                }
                 if let Some(action) = gamepad_button_action(b.button) {
                     self.button(Source::Button(b.which.0, b.button), action, b.down);
                 }
@@ -213,6 +241,10 @@ impl<F: Fn(InputEvent)> Pads<F> {
             }
             SDL_EVENT_JOYSTICK_BUTTON_DOWN | SDL_EVENT_JOYSTICK_BUTTON_UP => {
                 let b = unsafe { event.jbutton };
+                // Generic pads usually number Select 8 and Start 9.
+                if self.joysticks.contains_key(&b.which.0) && (b.button == 8 || b.button == 9) {
+                    self.combo_button(b.which.0, b.button == 9, b.down);
+                }
                 if self.joysticks.contains_key(&b.which.0)
                     && let Some(action) = generic_button_action(b.button)
                 {
@@ -268,6 +300,7 @@ impl<F: Fn(InputEvent)> Pads<F> {
             self.held = None;
         }
         self.sticks.remove(&id);
+        self.combos.remove(&id);
         self.triggers.retain(|&(device, _)| device != id);
     }
 
@@ -324,8 +357,33 @@ impl<F: Fn(InputEvent)> Pads<F> {
         }
     }
 
+    fn combo_button(&mut self, id: u32, is_start: bool, down: bool) {
+        let combo = self.combos.entry(id).or_default();
+        if is_start {
+            combo.start = down;
+        } else {
+            combo.select = down;
+        }
+        if combo.start && combo.select {
+            combo.since.get_or_insert_with(Instant::now);
+        } else {
+            combo.since = None;
+            combo.fired = false;
+        }
+    }
+
     fn repeat_if_due(&mut self) {
         let now = Instant::now();
+        for combo in self.combos.values_mut() {
+            if !combo.fired
+                && combo
+                    .since
+                    .is_some_and(|since| now.duration_since(since) >= COMBO_HOLD)
+            {
+                combo.fired = true;
+                (self.emit)(InputEvent::HomeCombo);
+            }
+        }
         if let Some(held) = self.held.as_mut()
             && now >= held.next
         {

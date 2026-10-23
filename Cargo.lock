@@ -1256,6 +1256,7 @@ dependencies = [
 name = "game-launcher"
 version = "0.1.0"
 dependencies = [
+ "raw-window-handle",
  "sdl3-sys",
  "serde",
  "serde_json",
@@ -3759,6 +3760,7 @@ dependencies = [
  "num-traits",
  "once_cell",
  "pin-weak",
+ "raw-window-handle",
  "slint-macros",
  "unicode-segmentation",
  "vtable",

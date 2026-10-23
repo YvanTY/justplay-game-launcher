@@ -142,6 +142,7 @@ export component AppWindow inherits Window {
     in property <image> logo;
     in property <bool> has-logo;
     in property <bool> is-favorite;
+    in property <bool> selected-running;
 
     in property <bool> sheet-open;
     in property <[string]> sheet-items;
@@ -153,6 +154,9 @@ export component AppWindow inherits Window {
 
     callback action(Action);
     callback notify(string);
+    callback home-combo();
+    // Empty message: the game ended normally; otherwise why it failed.
+    callback game-ended(string);
 
     // 1px at 1080p; everything scales with the screen.
     property <length> u: min(root.width / 1920, root.height / 1080);
@@ -335,7 +339,7 @@ export component AppWindow inherits Window {
                 }
 
                 Text {
-                    text: "Play";
+                    text: selected-running ? "Resume" : "Play";
                     font-size: 28 * u;
                     font-weight: 600;
                     color: zone == Zone.actions && action-index == 0 ? black : white;

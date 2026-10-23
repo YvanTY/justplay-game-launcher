@@ -24,6 +24,8 @@ pub struct Tab {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SheetItem {
     Play,
+    Resume,
+    CloseGame,
     ToggleFavorite,
 }
 
@@ -40,6 +42,9 @@ pub enum Effect {
     Selection,
     Launch(usize),
     SaveState,
+    /// Bring the running game back to the front.
+    Resume,
+    CloseGame,
 }
 
 pub struct Home {
@@ -53,6 +58,8 @@ pub struct Home {
     pub recent: Vec<usize>,
     pub recent_focus: usize,
     pub sheet: Option<Sheet>,
+    /// The game currently running, if any.
+    pub running: Option<usize>,
 }
 
 impl Home {
@@ -67,6 +74,7 @@ impl Home {
             recent: Vec::new(),
             recent_focus: 0,
             sheet: None,
+            running: None,
         };
         home.rebuild();
         home
@@ -81,8 +89,32 @@ impl Home {
         tab.games.get(tab.focus).copied()
     }
 
-    pub fn sheet_items(&self) -> [SheetItem; 2] {
-        [SheetItem::Play, SheetItem::ToggleFavorite]
+    pub fn sheet_items(&self) -> Vec<SheetItem> {
+        let game = self.sheet.as_ref().map(|s| s.game);
+        if game.is_some() && game == self.running {
+            vec![
+                SheetItem::Resume,
+                SheetItem::CloseGame,
+                SheetItem::ToggleFavorite,
+            ]
+        } else {
+            vec![SheetItem::Play, SheetItem::ToggleFavorite]
+        }
+    }
+
+    /// Playing the game that is already running just brings it back.
+    fn play(&self, game: Option<usize>) -> Vec<Effect> {
+        match game {
+            Some(game) if Some(game) == self.running => vec![Effect::Resume],
+            Some(game) => vec![Effect::Launch(game)],
+            None => Vec::new(),
+        }
+    }
+
+    pub fn record_played(&mut self, game: usize, unix_seconds: u64) {
+        let id = self.games[game].id.clone();
+        self.state.last_played.insert(id, unix_seconds);
+        self.rebuild();
     }
 
     pub fn is_favorite(&self, game: usize) -> bool {
@@ -150,11 +182,7 @@ impl Home {
                 self.action = 0;
                 self.go(Zone::Actions)
             }
-            (Zone::Icons, Action::Confirm) => self
-                .selected_game()
-                .map(Effect::Launch)
-                .into_iter()
-                .collect(),
+            (Zone::Icons, Action::Confirm) => self.play(self.selected_game()),
             (Zone::Icons | Zone::Actions, Action::Options) => self.open_sheet(self.selected_game()),
 
             (Zone::Actions, Action::Left) => {
@@ -167,11 +195,7 @@ impl Home {
             }
             (Zone::Actions, Action::Up | Action::Back) => self.go(Zone::Icons),
             (Zone::Actions, Action::Down) if !self.recent.is_empty() => self.go(Zone::Recent),
-            (Zone::Actions, Action::Confirm) if self.action == 0 => self
-                .selected_game()
-                .map(Effect::Launch)
-                .into_iter()
-                .collect(),
+            (Zone::Actions, Action::Confirm) if self.action == 0 => self.play(self.selected_game()),
             (Zone::Actions, Action::Confirm) => self.open_sheet(self.selected_game()),
 
             (Zone::Recent, Action::Left) => {
@@ -184,12 +208,9 @@ impl Home {
                 Vec::new()
             }
             (Zone::Recent, Action::Up | Action::Back) => self.go(Zone::Actions),
-            (Zone::Recent, Action::Confirm) => self
-                .recent
-                .get(self.recent_focus)
-                .map(|&g| Effect::Launch(g))
-                .into_iter()
-                .collect(),
+            (Zone::Recent, Action::Confirm) => {
+                self.play(self.recent.get(self.recent_focus).copied())
+            }
             (Zone::Recent, Action::Options) => {
                 self.open_sheet(self.recent.get(self.recent_focus).copied())
             }
@@ -208,10 +229,13 @@ impl Home {
             Action::Back | Action::Options => self.sheet = None,
             Action::Confirm => {
                 let game = sheet.game;
-                let item = items[sheet.focus];
+                // The item list can shrink under an open sheet (the game exits), so clamp.
+                let item = items[sheet.focus.min(items.len() - 1)];
                 self.sheet = None;
                 return match item {
                     SheetItem::Play => vec![Effect::Launch(game)],
+                    SheetItem::Resume => vec![Effect::Resume],
+                    SheetItem::CloseGame => vec![Effect::CloseGame],
                     SheetItem::ToggleFavorite => {
                         let id = self.games[game].id.clone();
                         self.state.toggle_favorite(&id);
@@ -423,6 +447,48 @@ mod tests {
         assert_eq!(names(&home), ["Home", "PC", "PS3"]);
         assert_eq!(home.current, 0);
         assert!(home.sheet.is_none());
+    }
+
+    #[test]
+    fn running_game_offers_resume_and_close() {
+        let mut home = Home::new(sample(), State::default());
+        home.running = Some(0);
+        assert_eq!(home.handle(Action::Confirm), [Effect::Resume]);
+        home.handle(Action::Options);
+        assert_eq!(
+            home.sheet_items(),
+            [
+                SheetItem::Resume,
+                SheetItem::CloseGame,
+                SheetItem::ToggleFavorite
+            ]
+        );
+        home.handle(Action::Down);
+        assert_eq!(home.handle(Action::Confirm), [Effect::CloseGame]);
+        // Another game still launches normally (main.rs decides what to do about the running one).
+        home.handle(Action::Right);
+        assert_eq!(home.handle(Action::Confirm), [Effect::Launch(1)]);
+    }
+
+    #[test]
+    fn recording_a_launch_moves_game_to_front_of_home_and_recent() {
+        let mut home = Home::new(sample(), State::default());
+        home.record_played(2, 1_000);
+        assert_eq!(home.tabs[0].games[0], 2);
+        assert_eq!(home.recent, [2]);
+    }
+
+    #[test]
+    fn sheet_survives_game_exiting_while_open() {
+        let mut home = Home::new(sample(), State::default());
+        home.running = Some(0);
+        home.handle(Action::Options);
+        home.handle(Action::Down);
+        home.handle(Action::Down);
+        // Cursor is on the third item when the game exits and the list drops to two items.
+        home.running = None;
+        let effects = home.handle(Action::Confirm);
+        assert!(effects.contains(&Effect::SaveState), "{effects:?}");
     }
 
     #[test]

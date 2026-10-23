@@ -4,6 +4,7 @@
 mod config;
 mod home;
 mod input;
+mod launcher;
 mod library;
 mod nav;
 mod state;
@@ -12,12 +13,14 @@ use std::cell::RefCell;
 use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
+use std::sync::atomic::Ordering;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use slint::{Color, Image, ModelRc, SharedString, Timer, TimerMode, VecModel};
 
 use home::{Effect, Home, SheetItem};
 use input::InputEvent;
+use launcher::{Ended, Running};
 use library::{Game, Library};
 use state::State;
 
@@ -36,6 +39,9 @@ struct App {
     toasts: Rc<Toasts>,
     hero_timer: Timer,
     clock_timer: Timer,
+    running: Option<Running>,
+    /// True while the launcher is hidden behind a running game.
+    in_background: bool,
 }
 
 fn main() -> Result<(), slint::PlatformError> {
@@ -71,6 +77,8 @@ fn main() -> Result<(), slint::PlatformError> {
         toasts: Rc::new(Toasts::default()),
         hero_timer: Timer::default(),
         clock_timer: Timer::default(),
+        running: None,
+        in_background: false,
     }));
 
     {
@@ -99,6 +107,10 @@ fn main() -> Result<(), slint::PlatformError> {
         let app = app.clone();
         move |action| {
             let ui = weak.unwrap();
+            // While a game has the screen, pads are only listened to for the home combo.
+            if app.borrow().in_background {
+                return;
+            }
             if action == Action::Menu {
                 let toasts = app.borrow().toasts.clone();
                 toasts.show(&ui, "The quick panel arrives in step 6".into());
@@ -116,6 +128,16 @@ fn main() -> Result<(), slint::PlatformError> {
             toasts.show(&weak.unwrap(), text.into());
         }
     });
+    ui.on_home_combo({
+        let weak = ui.as_weak();
+        let app = app.clone();
+        move || home_combo(&weak.unwrap(), &mut app.borrow_mut())
+    });
+    ui.on_game_ended({
+        let weak = ui.as_weak();
+        let app = app.clone();
+        move |message| game_ended(&weak.unwrap(), &mut app.borrow_mut(), &message)
+    });
 
     let weak = ui.as_weak();
     input::spawn(move |event| {
@@ -126,12 +148,19 @@ fn main() -> Result<(), slint::PlatformError> {
             match event {
                 InputEvent::Action(action) => ui.invoke_action(action),
                 InputEvent::Notice(text) => ui.invoke_notify(text.into()),
+                InputEvent::HomeCombo => ui.invoke_home_combo(),
             }
         });
     });
 
+    ui.window().on_close_requested(|| {
+        // Hiding the window for a game must not end the app, so only an explicit close quits.
+        let _ = slint::quit_event_loop();
+        slint::CloseRequestResponse::HideWindow
+    });
     ui.window().set_fullscreen(true);
-    ui.run()
+    ui.show()?;
+    slint::run_event_loop_until_quit()
 }
 
 fn apply_effects(ui: &AppWindow, app_rc: &Rc<RefCell<App>>, effects: &[Effect]) {
@@ -140,12 +169,13 @@ fn apply_effects(ui: &AppWindow, app_rc: &Rc<RefCell<App>>, effects: &[Effect]) 
         match effect {
             Effect::Tabs => push_tabs(ui, &mut app),
             Effect::Selection => push_selection(ui, &mut app),
-            Effect::Launch(game) => {
-                // Until launching lands in step 4, show the exact command it will run.
-                let launch = &app.home.games[*game].launch;
-                let exe = launch.exe.file_name().unwrap_or_default().to_string_lossy();
-                let text = format!("Step 4 will run: {exe} {}", launch.args.join(" "));
-                app.toasts.show(ui, text);
+            Effect::Launch(game) => start_game(ui, &mut app, *game),
+            Effect::Resume => resume_game(ui, &mut app),
+            Effect::CloseGame => {
+                // The watcher notices the processes ending and brings the launcher back.
+                if let Some(running) = &app.running {
+                    launcher::close(running);
+                }
             }
             Effect::SaveState => {
                 if let Err(e) = app.home.state.save(&app.state_path) {
@@ -224,6 +254,7 @@ fn push_selection(ui: &AppWindow, app: &mut App) {
     };
     ui.set_info(info.into());
     ui.set_is_favorite(home.is_favorite(index));
+    ui.set_selected_running(home.running == Some(index));
     ui.set_backdrop(title_color(&game.title));
     let logo = game.art.logo.as_deref().and_then(|p| images.icon(p));
     ui.set_has_logo(logo.is_some());
@@ -243,6 +274,8 @@ fn push_scalars(ui: &AppWindow, home: &Home) {
             .iter()
             .map(|item| match item {
                 SheetItem::Play => "Play".into(),
+                SheetItem::Resume => "Resume".into(),
+                SheetItem::CloseGame => "Close game".into(),
                 SheetItem::ToggleFavorite if home.is_favorite(sheet.game) => {
                     "Remove from Favorites".into()
                 }
@@ -283,6 +316,135 @@ fn show_hero(ui: &AppWindow, app: &mut App) {
         None => ui.set_has_hero(false),
     }
     *shown_hero = path;
+}
+
+fn start_game(ui: &AppWindow, app: &mut App, game: usize) {
+    if let Some(running) = app.home.running {
+        let title = app.home.games[running].title.clone();
+        app.toasts
+            .show(ui, format!("Close {title} first (⋯ → Close game)"));
+        return;
+    }
+    let weak = ui.as_weak();
+    let started = launcher::start(&app.home.games[game].launch, move |ended| {
+        let message = match ended {
+            Ended::Normally => String::new(),
+            Ended::Failed(message) => message,
+        };
+        // Only fails once the event loop has shut down, when there is nothing left to update.
+        let _ = slint::invoke_from_event_loop(move || {
+            if let Some(ui) = weak.upgrade() {
+                ui.invoke_game_ended(message.into());
+            }
+        });
+    });
+    match started {
+        Ok(running) => {
+            app.running = Some(running);
+            app.home.running = Some(game);
+            app.home.record_played(game, unix_now());
+            if let Err(e) = app.home.state.save(&app.state_path) {
+                app.toasts.show(ui, e);
+            }
+            push_tabs(ui, app);
+            push_selection(ui, app);
+            push_scalars(ui, &app.home);
+            go_background(ui, app);
+        }
+        Err(e) => app.toasts.show(ui, e),
+    }
+}
+
+fn resume_game(ui: &AppWindow, app: &mut App) {
+    let Some(running) = &app.running else { return };
+    match launcher::game_window(running) {
+        Some(game_window) => {
+            go_background(ui, app);
+            launcher::bring_to_front(game_window);
+        }
+        None => app
+            .toasts
+            .show(ui, "Couldn't find the game's window".into()),
+    }
+}
+
+/// Start + Select: over a game it brings the launcher up; in the launcher it returns to the game.
+fn home_combo(ui: &AppWindow, app: &mut App) {
+    let Some(game) = app.home.running else { return };
+    if app.in_background {
+        come_back(ui, app);
+        let title = app.home.games[game].title.clone();
+        app.toasts.show(
+            ui,
+            format!("{title} is still running: Resume or close it from ⋯"),
+        );
+    } else {
+        resume_game(ui, app);
+    }
+}
+
+fn game_ended(ui: &AppWindow, app: &mut App, message: &str) {
+    let title = app
+        .home
+        .running
+        .map(|g| app.home.games[g].title.clone())
+        .unwrap_or_default();
+    app.running = None;
+    app.home.running = None;
+    // A sheet opened on the running game lists Resume / Close game, which no longer apply.
+    app.home.sheet = None;
+    if app.in_background {
+        come_back(ui, app);
+    } else {
+        push_selection(ui, app);
+        push_scalars(ui, &app.home);
+    }
+    if !message.is_empty() {
+        app.toasts.show(ui, format!("{title} {message}"));
+    }
+}
+
+/// Gets out of the game's way: hidden window, full-screen art released, slow pad polling.
+fn go_background(ui: &AppWindow, app: &mut App) {
+    app.in_background = true;
+    input::IN_GAME.store(true, Ordering::Relaxed);
+    app.hero_timer.stop();
+    if let Err(e) = ui.hide() {
+        eprintln!("[launcher] could not hide the window: {e}");
+    }
+    ui.set_has_hero(false);
+    ui.set_hero_a(Image::default());
+    ui.set_hero_b(Image::default());
+    app.images.heroes.clear();
+    app.shown_hero = None;
+    launcher::trim_memory();
+}
+
+fn come_back(ui: &AppWindow, app: &mut App) {
+    app.in_background = false;
+    input::IN_GAME.store(false, Ordering::Relaxed);
+    if let Err(e) = ui.show() {
+        app.toasts
+            .show(ui, format!("Could not show the launcher: {e}"));
+        return;
+    }
+    ui.window().set_fullscreen(true);
+    match window_handle(ui) {
+        Some(hwnd) => launcher::bring_to_front(hwnd),
+        None => eprintln!("[launcher] no window handle to bring to the front"),
+    }
+    push_selection(ui, app);
+    push_scalars(ui, &app.home);
+    show_hero(ui, app);
+}
+
+fn window_handle(ui: &AppWindow) -> Option<windows_sys::Win32::Foundation::HWND> {
+    use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+    let handle = ui.window().window_handle();
+    match handle.window_handle().ok()?.as_raw() {
+        RawWindowHandle::Win32(win32) => Some(win32.hwnd.get() as _),
+        _ => None,
+    }
 }
 
 fn make_tile(game: &Game, images: &mut ImageCache) -> Tile {
