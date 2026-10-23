@@ -1,0 +1,444 @@
+//! Home screen logic: tabs, the game row, action buttons, recently played and the game sheet.
+//! Kept free of UI calls so navigation can be unit-tested; main.rs mirrors it into the window.
+
+use std::cmp::Reverse;
+use std::collections::HashMap;
+
+use crate::library::Game;
+use crate::nav;
+use crate::state::State;
+use crate::{Action, Zone};
+
+/// Games skipped by LT / RT.
+pub const PAGE: isize = 8;
+const RECENT_LIMIT: usize = 8;
+pub const FAVORITES_TAB: &str = "Favorites";
+
+pub struct Tab {
+    pub name: String,
+    /// Indices into `Home::games`.
+    pub games: Vec<usize>,
+    pub focus: usize,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SheetItem {
+    Play,
+    ToggleFavorite,
+}
+
+pub struct Sheet {
+    pub game: usize,
+    pub focus: usize,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub enum Effect {
+    /// Tab list or the current tab's games changed.
+    Tabs,
+    /// A different game is selected in the row.
+    Selection,
+    Launch(usize),
+    SaveState,
+}
+
+pub struct Home {
+    pub games: Vec<Game>,
+    pub state: State,
+    pub tabs: Vec<Tab>,
+    pub current: usize,
+    pub zone: Zone,
+    /// 0 = Play, 1 = ⋯
+    pub action: usize,
+    pub recent: Vec<usize>,
+    pub recent_focus: usize,
+    pub sheet: Option<Sheet>,
+}
+
+impl Home {
+    pub fn new(games: Vec<Game>, state: State) -> Home {
+        let mut home = Home {
+            games,
+            state,
+            tabs: Vec::new(),
+            current: 0,
+            zone: Zone::Icons,
+            action: 0,
+            recent: Vec::new(),
+            recent_focus: 0,
+            sheet: None,
+        };
+        home.rebuild();
+        home
+    }
+
+    pub fn tab(&self) -> &Tab {
+        &self.tabs[self.current]
+    }
+
+    pub fn selected_game(&self) -> Option<usize> {
+        let tab = self.tab();
+        tab.games.get(tab.focus).copied()
+    }
+
+    pub fn sheet_items(&self) -> [SheetItem; 2] {
+        [SheetItem::Play, SheetItem::ToggleFavorite]
+    }
+
+    pub fn is_favorite(&self, game: usize) -> bool {
+        self.state.favorites.contains(&self.games[game].id)
+    }
+
+    /// Recomputes tabs after favorites or history change, keeping the user where they were.
+    pub fn rebuild(&mut self) {
+        let current_name = self.tabs.get(self.current).map(|t| t.name.clone());
+        let focused: HashMap<String, (usize, usize)> = self
+            .tabs
+            .iter()
+            .map(|t| {
+                (
+                    t.name.clone(),
+                    (t.games.get(t.focus).copied().unwrap_or(usize::MAX), t.focus),
+                )
+            })
+            .collect();
+
+        self.tabs = build_tabs(&self.games, &self.state);
+        for tab in &mut self.tabs {
+            if let Some(&(game, old_focus)) = focused.get(&tab.name) {
+                tab.focus = tab
+                    .games
+                    .iter()
+                    .position(|&g| g == game)
+                    .unwrap_or_else(|| old_focus.min(tab.games.len().saturating_sub(1)));
+            }
+        }
+        self.current = current_name
+            .and_then(|name| self.tabs.iter().position(|t| t.name == name))
+            .unwrap_or(0);
+        self.recent = recently_played(&self.games, &self.state);
+        self.recent_focus = self.recent_focus.min(self.recent.len().saturating_sub(1));
+        if self.zone == Zone::Recent && self.recent.is_empty() {
+            self.zone = Zone::Actions;
+        }
+        if self.tab().games.is_empty() && matches!(self.zone, Zone::Actions | Zone::Recent) {
+            self.zone = Zone::Icons;
+        }
+    }
+
+    pub fn handle(&mut self, action: Action) -> Vec<Effect> {
+        if self.sheet.is_some() {
+            return self.handle_sheet(action);
+        }
+        match action {
+            Action::TabPrev => return self.switch_tab(-1),
+            Action::TabNext => return self.switch_tab(1),
+            _ => {}
+        }
+        let has_games = !self.tab().games.is_empty();
+        match (self.zone, action) {
+            (Zone::Tabs, Action::Left) => self.switch_tab(-1),
+            (Zone::Tabs, Action::Right) => self.switch_tab(1),
+            (Zone::Tabs, Action::Down | Action::Confirm) => self.go(Zone::Icons),
+
+            (Zone::Icons, Action::Left) => self.move_focus(-1),
+            (Zone::Icons, Action::Right) => self.move_focus(1),
+            (Zone::Icons, Action::PagePrev) => self.move_focus(-PAGE),
+            (Zone::Icons, Action::PageNext) => self.move_focus(PAGE),
+            (Zone::Icons, Action::Up | Action::Back) => self.go(Zone::Tabs),
+            (Zone::Icons, Action::Down) if has_games => {
+                self.action = 0;
+                self.go(Zone::Actions)
+            }
+            (Zone::Icons, Action::Confirm) => self
+                .selected_game()
+                .map(Effect::Launch)
+                .into_iter()
+                .collect(),
+            (Zone::Icons | Zone::Actions, Action::Options) => self.open_sheet(self.selected_game()),
+
+            (Zone::Actions, Action::Left) => {
+                self.action = 0;
+                Vec::new()
+            }
+            (Zone::Actions, Action::Right) => {
+                self.action = 1;
+                Vec::new()
+            }
+            (Zone::Actions, Action::Up | Action::Back) => self.go(Zone::Icons),
+            (Zone::Actions, Action::Down) if !self.recent.is_empty() => self.go(Zone::Recent),
+            (Zone::Actions, Action::Confirm) if self.action == 0 => self
+                .selected_game()
+                .map(Effect::Launch)
+                .into_iter()
+                .collect(),
+            (Zone::Actions, Action::Confirm) => self.open_sheet(self.selected_game()),
+
+            (Zone::Recent, Action::Left) => {
+                self.recent_focus = self.recent_focus.saturating_sub(1);
+                Vec::new()
+            }
+            (Zone::Recent, Action::Right) => {
+                self.recent_focus =
+                    (self.recent_focus + 1).min(self.recent.len().saturating_sub(1));
+                Vec::new()
+            }
+            (Zone::Recent, Action::Up | Action::Back) => self.go(Zone::Actions),
+            (Zone::Recent, Action::Confirm) => self
+                .recent
+                .get(self.recent_focus)
+                .map(|&g| Effect::Launch(g))
+                .into_iter()
+                .collect(),
+            (Zone::Recent, Action::Options) => {
+                self.open_sheet(self.recent.get(self.recent_focus).copied())
+            }
+            _ => Vec::new(),
+        }
+    }
+
+    fn handle_sheet(&mut self, action: Action) -> Vec<Effect> {
+        let items = self.sheet_items();
+        let Some(sheet) = self.sheet.as_mut() else {
+            return Vec::new();
+        };
+        match action {
+            Action::Up => sheet.focus = sheet.focus.saturating_sub(1),
+            Action::Down => sheet.focus = (sheet.focus + 1).min(items.len() - 1),
+            Action::Back | Action::Options => self.sheet = None,
+            Action::Confirm => {
+                let game = sheet.game;
+                let item = items[sheet.focus];
+                self.sheet = None;
+                return match item {
+                    SheetItem::Play => vec![Effect::Launch(game)],
+                    SheetItem::ToggleFavorite => {
+                        let id = self.games[game].id.clone();
+                        self.state.toggle_favorite(&id);
+                        self.rebuild();
+                        vec![Effect::Tabs, Effect::Selection, Effect::SaveState]
+                    }
+                };
+            }
+            _ => {}
+        }
+        Vec::new()
+    }
+
+    fn open_sheet(&mut self, game: Option<usize>) -> Vec<Effect> {
+        if let Some(game) = game {
+            self.sheet = Some(Sheet { game, focus: 0 });
+        }
+        Vec::new()
+    }
+
+    fn go(&mut self, zone: Zone) -> Vec<Effect> {
+        self.zone = zone;
+        Vec::new()
+    }
+
+    fn switch_tab(&mut self, delta: isize) -> Vec<Effect> {
+        if self.tabs.len() < 2 {
+            return Vec::new();
+        }
+        self.current = nav::wrap_index(self.current, self.tabs.len(), delta);
+        if self.tab().games.is_empty() || matches!(self.zone, Zone::Recent) {
+            self.zone = if self.zone == Zone::Tabs {
+                Zone::Tabs
+            } else {
+                Zone::Icons
+            };
+        }
+        vec![Effect::Tabs, Effect::Selection]
+    }
+
+    fn move_focus(&mut self, delta: isize) -> Vec<Effect> {
+        let tab = &mut self.tabs[self.current];
+        let next = nav::step(tab.focus, tab.games.len(), delta);
+        if next == tab.focus {
+            return Vec::new();
+        }
+        tab.focus = next;
+        vec![Effect::Selection]
+    }
+}
+
+/// Home lists recently played games first; then one tab per platform; Favorites last.
+fn build_tabs(games: &[Game], state: &State) -> Vec<Tab> {
+    let last_played = |i: &usize| state.last_played.get(&games[*i].id).copied().unwrap_or(0);
+    let mut home: Vec<usize> = (0..games.len()).collect();
+    // Stable sort: games arrive sorted by title, so never-played games stay alphabetical.
+    home.sort_by_key(|i| Reverse(last_played(i)));
+    let mut tabs = vec![Tab {
+        name: "Home".into(),
+        games: home,
+        focus: 0,
+    }];
+
+    let mut platforms: Vec<&str> = Vec::new();
+    for game in games {
+        if !platforms.contains(&game.platform.as_str()) {
+            platforms.push(&game.platform);
+        }
+    }
+    platforms.sort_by_key(|p| match *p {
+        "PC" => 0,
+        "PS3" => 1,
+        _ => 2,
+    });
+    for platform in platforms {
+        let indices = (0..games.len())
+            .filter(|&i| games[i].platform == platform)
+            .collect();
+        tabs.push(Tab {
+            name: platform.into(),
+            games: indices,
+            focus: 0,
+        });
+    }
+
+    let favorites: Vec<usize> = (0..games.len())
+        .filter(|&i| state.favorites.contains(&games[i].id))
+        .collect();
+    if !favorites.is_empty() {
+        tabs.push(Tab {
+            name: FAVORITES_TAB.into(),
+            games: favorites,
+            focus: 0,
+        });
+    }
+    tabs
+}
+
+fn recently_played(games: &[Game], state: &State) -> Vec<usize> {
+    let mut played: Vec<(u64, usize)> = (0..games.len())
+        .filter_map(|i| state.last_played.get(&games[i].id).map(|&t| (t, i)))
+        .collect();
+    played.sort_by_key(|&(t, _)| Reverse(t));
+    played
+        .into_iter()
+        .take(RECENT_LIMIT)
+        .map(|(_, i)| i)
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::library::{Art, Launch};
+
+    fn game(id: &str, title: &str, platform: &str) -> Game {
+        Game {
+            id: id.into(),
+            title: title.into(),
+            platform: platform.into(),
+            launch: Launch {
+                exe: "x.exe".into(),
+                args: vec![],
+            },
+            art: Art::default(),
+        }
+    }
+
+    fn sample() -> Vec<Game> {
+        vec![
+            game("ps3:BLUS30405", "Dante's Inferno", "PS3"),
+            game("pc:God of War", "God of War", "PC"),
+            game("ps3:BCUS98111", "God of War III", "PS3"),
+            game("pc:TLOU", "The Last of Us Part I", "PC"),
+        ]
+    }
+
+    fn names(home: &Home) -> Vec<&str> {
+        home.tabs.iter().map(|t| t.name.as_str()).collect()
+    }
+
+    #[test]
+    fn tabs_are_home_then_pc_then_ps3() {
+        let home = Home::new(sample(), State::default());
+        assert_eq!(names(&home), ["Home", "PC", "PS3"]);
+        assert_eq!(home.tabs[1].games, [1, 3]);
+    }
+
+    #[test]
+    fn home_puts_recently_played_first_and_fills_recent_row() {
+        let mut state = State::default();
+        state.last_played.insert("pc:TLOU".into(), 200);
+        state.last_played.insert("ps3:BLUS30405".into(), 100);
+        let home = Home::new(sample(), state);
+        assert_eq!(home.tabs[0].games, [3, 0, 1, 2]);
+        assert_eq!(home.recent, [3, 0]);
+    }
+
+    #[test]
+    fn vertical_navigation_moves_between_zones() {
+        let mut home = Home::new(sample(), State::default());
+        assert_eq!(home.zone, Zone::Icons);
+        home.handle(Action::Down);
+        assert_eq!(home.zone, Zone::Actions);
+        // No play history yet, so there is no recent row to move into.
+        home.handle(Action::Down);
+        assert_eq!(home.zone, Zone::Actions);
+        home.handle(Action::Up);
+        home.handle(Action::Up);
+        assert_eq!(home.zone, Zone::Tabs);
+        home.handle(Action::Right);
+        assert_eq!(home.current, 1);
+    }
+
+    #[test]
+    fn page_jump_clamps_to_ends() {
+        let mut home = Home::new(sample(), State::default());
+        assert_eq!(home.handle(Action::PageNext), [Effect::Selection]);
+        assert_eq!(home.tab().focus, 3);
+        assert!(home.handle(Action::PageNext).is_empty());
+        home.handle(Action::PagePrev);
+        assert_eq!(home.tab().focus, 0);
+    }
+
+    #[test]
+    fn confirm_launches_selected_game_from_row_and_play_button() {
+        let mut home = Home::new(sample(), State::default());
+        home.handle(Action::Right);
+        assert_eq!(home.handle(Action::Confirm), [Effect::Launch(1)]);
+        home.handle(Action::Down);
+        assert_eq!(home.handle(Action::Confirm), [Effect::Launch(1)]);
+    }
+
+    #[test]
+    fn favoriting_from_sheet_adds_and_removes_favorites_tab() {
+        let mut home = Home::new(sample(), State::default());
+        home.handle(Action::Options);
+        home.handle(Action::Down);
+        let effects = home.handle(Action::Confirm);
+        assert!(effects.contains(&Effect::SaveState));
+        assert_eq!(names(&home), ["Home", "PC", "PS3", "Favorites"]);
+
+        // Unfavorite from inside the Favorites tab: it disappears and we land back on Home.
+        home.handle(Action::TabPrev);
+        assert_eq!(home.tab().name, "Favorites");
+        home.handle(Action::Options);
+        home.handle(Action::Down);
+        home.handle(Action::Confirm);
+        assert_eq!(names(&home), ["Home", "PC", "PS3"]);
+        assert_eq!(home.current, 0);
+        assert!(home.sheet.is_none());
+    }
+
+    #[test]
+    fn empty_library_does_not_panic() {
+        let mut home = Home::new(Vec::new(), State::default());
+        for action in [
+            Action::Down,
+            Action::Confirm,
+            Action::Right,
+            Action::PageNext,
+            Action::Options,
+            Action::Up,
+        ] {
+            home.handle(action);
+        }
+        assert_eq!(names(&home), ["Home"]);
+        assert!(home.selected_game().is_none());
+    }
+}

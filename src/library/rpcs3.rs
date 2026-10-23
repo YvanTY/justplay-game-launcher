@@ -26,7 +26,14 @@ pub fn scan(config: &Rpcs3Config, warnings: &mut Vec<String>) -> Vec<Game> {
                 }
                 let path = PathBuf::from(path.trim_end_matches(['/', '\\']));
                 if !path.exists() {
-                    warnings.push(format!("PS3 game {serial} not found at {}", path.display()));
+                    // The last folder name is enough to recognise it on screen; full paths overflow.
+                    let name = path.file_name().map_or_else(
+                        || path.display().to_string(),
+                        |n| n.to_string_lossy().into_owned(),
+                    );
+                    warnings.push(format!(
+                        "PS3 game {serial} is missing (moved or deleted?): {name}"
+                    ));
                     continue;
                 }
                 // Disc games keep their data in PS3_GAME; RPCS3 also stores title data for
@@ -106,7 +113,9 @@ fn push_game(
         art: Art {
             icon: first("ICON0.PNG"),
             hero: first("PIC1.PNG"),
-            logo: first("PIC0.PNG"),
+            // PIC0 looks like a logo but is often an empty transparent placeholder (God of War III),
+            // so PS3 games show their title text unless the user supplies a logo.
+            logo: None,
         },
     });
 }

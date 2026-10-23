@@ -32,7 +32,7 @@ Changed after the step 1 test: Yvan prefers the full PS5 layout over the BuzzTV 
 - **Bottom row:** "Recently played" as wide cards using each game's art (up to 8). Down from the buttons moves into it, and A launches. *(Builder's call: PS5 shows news cards here. Recently played is the nearest useful thing for a local launcher.)*
 - **Background:** the selected game's hero art fills the screen behind a soft dark gradient (left and bottom) and crossfades when the selection moves. No art: a blurred, darkened version of its icon.
 - **Game row:** square icons (PS3 ICON0, emulator box art or user art, cropped to fill). The selected icon is larger, with a bright outline and its name to the right. The row slides so the selection always sits in the first slot, as on PS5.
-- **Logo & actions:** the game's logo image (PS3 games provide PIC0, or user art), otherwise its title in large type. Below it, a big **Play** button and a **⋯** button that opens the game sheet. Then an info line (platform, last played).
+- **Logo & actions:** the game's logo image (from the art folder), otherwise its title in large type. Below it, a big **Play** button and a **⋯** button that opens the game sheet. Then an info line (platform, last played).
 - **Music:** if the selected game has music, it fades in. Otherwise a quiet ambient bed plays.
 - **Tabs:** **Home** (recently played first, then everything), **PC** (manual entries), one tab per emulator system, and **Favorites**. Empty tabs are hidden. Each shows its game count.
 - **Quick panel (from BuzzTV):** a slide-in panel of large square buttons: Settings, Rescan library, Controller test, Power (Sleep / Restart / Shut down), Exit launcher, plus a clock.
@@ -65,7 +65,7 @@ Keyboard fallback: arrows, Enter, Esc/Backspace, Space (game sheet), Tab / Shift
 
 ## v0.1 scope (MVP)
 1. The home screen, tabs, game row, background art, quick panel and game sheet as described above.
-2. **RPCS3 (PS3) import:** read RPCS3's own game list (`config/games.yml`) plus games installed inside RPCS3 (`dev_hdd0/game`, category HG). Titles come from `PARAM.SFO`; art from the game's own `ICON0.PNG` (icon), `PIC1.PNG` (background) and `PIC0.PNG` (logo). A `hide` list in the config removes entries. *(Replaced the Steam scanner: Steam isn't installed on Yvan's PC.)*
+2. **RPCS3 (PS3) import:** read RPCS3's own game list (`config/games.yml`) plus games installed inside RPCS3 (`dev_hdd0/game`, category HG). Titles come from `PARAM.SFO`; art from the game's own `ICON0.PNG` (icon) and `PIC1.PNG` (background). `PIC0.PNG` is not used as a logo: it is often an empty transparent placeholder (God of War III), so PS3 games show their title text unless a logo is supplied in the art folder. A `hide` list in the config removes entries. *(Replaced the Steam scanner: Steam isn't installed on Yvan's PC.)*
 3. **Emulators:** in `config.toml`, each system lists its name, ROM folder, file extensions, emulator exe and argument template (e.g. `-L cores/snes.dll "{rom}"`). Art is loaded from `<artdir>/<rom name>.png|jpg` if present. Without art, a styled title tile is shown.
 4. **Manual games:** list any .exe in `config.toml` with a name and optional art.
 5. **Launch & return:** launch a game, hide the launcher and drop to near-zero resources. Detect the game's exit (process watch, including games that start a second process) and come back automatically. Hold Start + Select to force-return.

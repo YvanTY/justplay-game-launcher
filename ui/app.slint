@@ -1,28 +1,41 @@
-export enum Action { up, down, left, right, confirm, back, options, tab-prev, tab-next, menu }
+export enum Action { up, down, left, right, confirm, back, options, tab-prev, tab-next, page-prev, page-next, menu }
+
+export enum Zone { tabs, icons, actions, recent }
 
 export struct Tile {
     title: string,
-    subtitle: string,
     color: color,
     icon: image,
     has-icon: bool,
 }
 
+export struct TabInfo {
+    name: string,
+    count: int,
+}
+
+// Segoe MDL2 Assets ships with Windows 10 and 11 and holds the system UI glyphs.
+component Glyph inherits Text {
+    font-family: "Segoe MDL2 Assets";
+    color: white;
+    horizontal-alignment: center;
+    vertical-alignment: center;
+}
+
 component Badge inherits Rectangle {
     in property <string> label;
     in property <length> u;
-    width: max(self.height, txt.preferred-width + 22 * u);
-    height: 40 * u;
+    width: max(self.height, txt.preferred-width + 18 * u);
+    height: 32 * u;
     border-radius: self.height / 2;
-    background: #ffffff1f;
-    border-width: 2 * u;
-    border-color: #ffffff66;
+    border-width: 1.5 * u;
+    border-color: #ffffff59;
     txt := Text {
         width: parent.width;
         height: parent.height;
         text: label;
-        color: white;
-        font-size: 20 * u;
+        color: #ffffffd9;
+        font-size: 16 * u;
         font-weight: 700;
         horizontal-alignment: center;
         vertical-alignment: center;
@@ -33,100 +46,108 @@ component ButtonHint inherits HorizontalLayout {
     in property <string> key;
     in property <string> label;
     in property <length> u;
-    spacing: 12 * u;
-    alignment: center;
+    spacing: 10 * u;
     VerticalLayout {
         alignment: center;
         Badge { label: key; u: u; }
     }
     Text {
         text: label;
-        color: #ffffffd9;
-        font-size: 24 * u;
+        color: #ffffffa6;
+        font-size: 20 * u;
         vertical-alignment: center;
     }
 }
 
-component TabPill inherits Rectangle {
-    in property <string> label;
-    in property <int> count;
-    in property <bool> selected;
-    in property <bool> bar-focused;
-    in property <length> u;
-    border-radius: self.height / 2;
-    background: !selected ? transparent : bar-focused ? #2d8cff : #ffffff24;
-    animate background { duration: 150ms; }
-    horizontal-stretch: 0;
-    HorizontalLayout {
-        padding-left: 26 * u;
-        padding-right: 26 * u;
-        spacing: 10 * u;
-        Text {
-            text: label;
-            font-size: 30 * u;
-            font-weight: selected ? 700 : 500;
-            color: selected ? white : #ffffffa6;
-            vertical-alignment: center;
-        }
-
-        Text {
-            text: count;
-            font-size: 22 * u;
-            color: selected ? #ffffffcc : #ffffff66;
-            vertical-alignment: center;
-        }
-    }
-}
-
-component TileView inherits Rectangle {
+// Game art in a rounded tile. Wide art (PS3 icons are 320x176) is shown whole over a
+// dimmed, cropped copy of itself instead of having its title cropped off.
+component ArtTile inherits Rectangle {
     in property <Tile> tile;
-    in property <bool> focused;
+    in property <bool> ring;
     in property <length> u;
+    in property <length> title-size: 18 * u;
+    property <bool> wide: tile.icon.width > tile.icon.height * 1.2;
     border-radius: 14 * u;
-    background: tile.color;
-    drop-shadow-blur: focused ? 30 * u : 0;
-    drop-shadow-color: #2d8cffb3;
+    background: tile.has-icon ? #0c0f16 : tile.color;
     clip: true;
-    if tile.has-icon: Image {
+    if tile.has-icon && wide: Image {
         width: parent.width;
         height: parent.height;
         source: tile.icon;
         image-fit: cover;
+        opacity: 0.35;
+    }
+    if tile.has-icon: Image {
+        width: parent.width;
+        height: parent.height;
+        source: tile.icon;
+        image-fit: wide ? contain : cover;
     }
     if !tile.has-icon: Text {
-        x: 18 * u;
-        width: parent.width - 36 * u;
+        x: 10 * u;
+        width: parent.width - 20 * u;
         height: parent.height;
         text: tile.title;
-        font-size: 28 * u;
-        font-weight: 700;
+        font-size: title-size;
+        font-weight: 600;
         color: white;
         wrap: word-wrap;
         horizontal-alignment: center;
         vertical-alignment: center;
     }
-    // Focus ring sits on top so it stays visible over bright art.
     Rectangle {
         border-radius: parent.border-radius;
-        border-width: focused ? 5 * u : 0;
+        border-width: ring ? 4 * u : 0;
         border-color: white;
     }
 }
 
+component PillButton inherits Rectangle {
+    in property <bool> focused;
+    in property <length> u;
+    border-radius: self.height / 2;
+    background: focused ? white : #ffffff29;
+    border-width: focused ? 0 : 1px;
+    border-color: #ffffff33;
+    drop-shadow-blur: focused ? 24 * u : 0;
+    drop-shadow-color: #ffffff40;
+    animate background { duration: 120ms; }
+}
+
 export component AppWindow inherits Window {
     title: "Game Launcher";
-    background: #04060b;
+    background: #05070b;
     default-font-family: "Segoe UI";
     preferred-width: 1600px;
     preferred-height: 900px;
 
-    in property <[string]> tabs;
-    in property <[int]> tab-counts;
+    in property <[TabInfo]> tabs;
     in property <int> current-tab;
-    in property <bool> in-tabs;
-    in property <[Tile]> tiles;
+    in property <Zone> zone;
+    in property <[Tile]> icons;
     in property <int> selected;
-    in property <int> columns: 5;
+    in property <int> action-index;
+    in property <[Tile]> recent;
+    in property <int> recent-index;
+
+    // Two background layers crossfade: the new art goes on the hidden one, then they swap.
+    in property <image> hero-a;
+    in property <image> hero-b;
+    in property <bool> show-a: true;
+    in property <bool> has-hero;
+    in property <color> backdrop: #1b2236;
+
+    in property <string> game-title;
+    in property <string> info;
+    in property <image> logo;
+    in property <bool> has-logo;
+    in property <bool> is-favorite;
+
+    in property <bool> sheet-open;
+    in property <[string]> sheet-items;
+    in property <int> sheet-index;
+
+    in property <string> clock;
     in property <string> toast;
     in property <bool> toast-visible;
 
@@ -136,117 +157,249 @@ export component AppWindow inherits Window {
     // 1px at 1080p; everything scales with the screen.
     property <length> u: min(root.width / 1920, root.height / 1080);
     property <length> margin: 96 * u;
-    property <length> gap: 24 * u;
-    property <length> grid-width: root.width - 2 * margin;
-    property <length> tile-w: (grid-width - (columns - 1) * gap) / columns;
-    property <length> tile-h: tile-w * 9 / 16;
-    property <length> row-h: tile-h + gap;
-    property <int> focus-row: Math.floor(selected / columns);
-    // Keep one row above the focused one visible so the grid never feels like it jumped.
-    property <int> scroll-row: Math.max(0, focus-row - 1);
-    property <Tile> focused-tile: tiles[selected];
+    property <length> small: 100 * u;
+    property <length> big: 164 * u;
+    property <length> gap: 14 * u;
+    property <length> row-y: 128 * u;
+    property <length> card-w: 300 * u;
+    property <length> card-gap: 20 * u;
 
-    // Stand-in for the focused game's hero art (step 3): its color fills the screen.
+    // --- Background: game art, or a soft gradient of the game's color without art ---
     Rectangle {
-        background: focused-tile.color.darker(0.35);
-        animate background { duration: 450ms; easing: ease-in-out; }
+        background: @linear-gradient(135deg, backdrop.darker(0.2) 0%, backdrop.darker(0.75) 100%);
+        animate background { duration: 450ms; }
+    }
+
+    Image {
+        width: parent.width;
+        height: parent.height;
+        source: hero-a;
+        image-fit: cover;
+        opacity: has-hero && show-a ? 1 : 0;
+        animate opacity { duration: 450ms; easing: ease-in-out; }
+    }
+
+    Image {
+        width: parent.width;
+        height: parent.height;
+        source: hero-b;
+        image-fit: cover;
+        opacity: has-hero && !show-a ? 1 : 0;
+        animate opacity { duration: 450ms; easing: ease-in-out; }
+    }
+
+    // Scrims keep text readable on bright art: left for the logo, top for the row, bottom for cards.
+    Rectangle {
+        background: @linear-gradient(90deg, #000000c8 0%, #00000070 40%, #00000000 75%);
     }
 
     Rectangle {
-        background: @linear-gradient(90deg, #04060bf0 0%, #04060b99 45%, #04060b33 100%);
+        background: @linear-gradient(180deg, #000000b8 0%, #00000000 38%);
     }
 
     Rectangle {
-        background: @linear-gradient(0deg, #04060bff 0%, #04060b00 60%);
+        background: @linear-gradient(0deg, #000000e6 0%, #00000000 50%);
+    }
+
+    // --- Top bar: plain text tabs (PS5 "Games / Media"), gear and clock ---
+    HorizontalLayout {
+        x: margin - 16 * u;
+        y: 36 * u;
+        height: 56 * u;
+        spacing: 18 * u;
+        alignment: start;
+        for tab[i] in tabs: Rectangle {
+            horizontal-stretch: 0;
+            border-radius: 12 * u;
+            background: zone == Zone.tabs && i == current-tab ? #ffffff26 : transparent;
+            animate background { duration: 120ms; }
+            HorizontalLayout {
+                padding-left: 16 * u;
+                padding-right: 16 * u;
+                spacing: 8 * u;
+                Text {
+                    text: tab.name;
+                    font-size: 32 * u;
+                    font-weight: i == current-tab ? 600 : 300;
+                    color: i == current-tab ? white : #ffffff8c;
+                    vertical-alignment: center;
+                }
+
+                Text {
+                    text: tab.count;
+                    font-size: 18 * u;
+                    color: #ffffff66;
+                    vertical-alignment: center;
+                }
+            }
+        }
     }
 
     HorizontalLayout {
-        x: margin - 6 * u;
-        y: 44 * u;
-        height: 64 * u;
-        spacing: 14 * u;
-        alignment: start;
-        VerticalLayout {
-            alignment: center;
-            Badge { label: "LB"; u: u; }
-        }
-
-        for name[i] in tabs: TabPill {
-            label: name;
-            count: tab-counts[i];
-            selected: i == current-tab;
-            bar-focused: in-tabs;
-            u: u;
-        }
-        VerticalLayout {
-            alignment: center;
-            Badge { label: "RB"; u: u; }
-        }
-    }
-
-    VerticalLayout {
         x: margin;
-        y: 180 * u;
-        width: grid-width * 0.7;
-        height: 200 * u;
-        alignment: start;
-        spacing: 6 * u;
-        Text {
-            text: focused-tile.title;
-            font-size: 76 * u;
-            font-weight: 800;
-            color: white;
-            overflow: elide;
+        y: 36 * u;
+        width: root.width - 2 * margin;
+        height: 56 * u;
+        spacing: 40 * u;
+        alignment: end;
+        Glyph {
+            text: "\u{E713}";
+            font-size: 28 * u;
         }
 
         Text {
-            text: focused-tile.subtitle;
-            font-size: 28 * u;
-            color: #ffffffb3;
+            text: clock;
+            font-size: 30 * u;
+            font-weight: 300;
+            color: white;
+            vertical-alignment: center;
         }
     }
 
-    Rectangle {
-        // Extra room around the grid so the enlarged focused tile and its glow aren't clipped.
-        x: margin - 30 * u;
-        y: 420 * u;
-        width: grid-width + 60 * u;
-        height: root.height - self.y - 110 * u;
-        clip: true;
-        Rectangle {
-            x: 30 * u;
-            // Top inset must stay below `gap` or the bottom of the row above peeks in.
-            y: 20 * u - scroll-row * row-h;
-            width: grid-width;
-            height: parent.height;
-            animate y { duration: 220ms; easing: ease-out; }
-            for tile[i] in tiles: TileView {
-                property <length> grow: i == selected && !in-tabs ? tile-w * 0.07 : 0px;
-                tile: tile;
-                focused: i == selected && !in-tabs;
-                u: u;
-                x: Math.mod(i, columns) * (tile-w + gap) - self.grow / 2;
-                y: Math.floor(i / columns) * row-h - self.grow * 9 / 32;
-                width: tile-w + self.grow;
-                height: tile-h + self.grow * 9 / 16;
-                // The partly visible row below the two full rows is dimmed so the cut edge reads as "more below".
-                opacity: Math.floor(i / columns) >= scroll-row + 2 ? 0.35 : 1;
-                animate x, y, width, height, opacity { duration: 140ms; easing: ease-out; }
+    // --- Game row: the selection always sits in the first slot, like PS5 ---
+    for tile[i] in icons: ArtTile {
+        property <bool> is-selected: i == selected;
+        tile: tile;
+        ring: is-selected && zone == Zone.icons;
+        u: u;
+        title-size: (is-selected ? 20 : 14) * u;
+        x: margin + (i - selected) * (small + gap) + (i > selected ? big - small : 0);
+        y: row-y;
+        width: is-selected ? big : small;
+        height: self.width;
+        visible: self.x > -big && self.x < root.width;
+        animate x, width { duration: 170ms; easing: ease-out; }
+    }
+
+    Text {
+        x: margin + big + gap + 6 * u;
+        y: row-y + small + 14 * u;
+        width: root.width - self.x - margin;
+        text: game-title;
+        font-size: 28 * u;
+        font-weight: 300;
+        color: white;
+        overflow: elide;
+    }
+
+    if icons.length == 0: Text {
+        x: margin;
+        y: row-y + 40 * u;
+        text: "No games here yet";
+        font-size: 30 * u;
+        font-weight: 300;
+        color: #ffffffb3;
+    }
+
+    // --- Logo (or big title), actions and info ---
+    if has-logo: Image {
+        x: margin;
+        y: 360 * u;
+        width: 760 * u;
+        height: 260 * u;
+        source: logo;
+        image-fit: contain;
+        horizontal-alignment: left;
+        vertical-alignment: bottom;
+    }
+    if !has-logo && icons.length > 0: Text {
+        x: margin;
+        y: 360 * u;
+        width: 1000 * u;
+        height: 260 * u;
+        text: game-title;
+        font-size: 84 * u;
+        font-weight: 700;
+        color: white;
+        wrap: word-wrap;
+        vertical-alignment: bottom;
+    }
+
+    if icons.length > 0: HorizontalLayout {
+        x: margin;
+        y: 650 * u;
+        height: 68 * u;
+        spacing: 16 * u;
+        alignment: start;
+        PillButton {
+            focused: zone == Zone.actions && action-index == 0;
+            u: u;
+            width: 230 * u;
+            HorizontalLayout {
+                alignment: center;
+                spacing: 12 * u;
+                Glyph {
+                    text: "\u{E768}";
+                    font-size: 22 * u;
+                    color: zone == Zone.actions && action-index == 0 ? black : white;
+                }
+
+                Text {
+                    text: "Play";
+                    font-size: 28 * u;
+                    font-weight: 600;
+                    color: zone == Zone.actions && action-index == 0 ? black : white;
+                    vertical-alignment: center;
+                }
             }
         }
 
+        PillButton {
+            focused: zone == Zone.actions && action-index == 1;
+            u: u;
+            width: self.height;
+            Glyph {
+                text: "\u{E712}";
+                font-size: 24 * u;
+                color: zone == Zone.actions && action-index == 1 ? black : white;
+            }
+        }
+
+        Rectangle {
+            width: 12 * u;
+        }
+
+        Text {
+            text: (is-favorite ? "★  " : "") + info;
+            font-size: 24 * u;
+            font-weight: 300;
+            color: #ffffffcc;
+            vertical-alignment: center;
+        }
+    }
+
+    // --- Recently played ---
+    if recent.length > 0: Text {
+        x: margin;
+        y: 770 * u;
+        text: "Recently played";
+        font-size: 24 * u;
+        font-weight: 300;
+        color: #ffffffcc;
+    }
+    for card[i] in recent: ArtTile {
+        property <int> scroll: Math.max(0, recent-index - 3);
+        tile: card;
+        ring: zone == Zone.recent && i == recent-index;
+        u: u;
+        x: margin + (i - scroll) * (card-w + card-gap);
+        y: 812 * u;
+        width: card-w;
+        height: card-w * 9 / 16;
+        border-radius: 10 * u;
+        animate x { duration: 170ms; easing: ease-out; }
     }
 
     HorizontalLayout {
         x: margin;
-        y: root.height - 84 * u;
-        width: grid-width;
-        height: 48 * u;
+        y: root.height - 52 * u;
+        width: root.width - 2 * margin;
+        height: 34 * u;
         alignment: end;
-        spacing: 40 * u;
+        spacing: 32 * u;
         ButtonHint {
             key: "A";
-            label: in-tabs ? "Open" : "Play";
+            label: zone == Zone.tabs ? "Open" : "Play";
             u: u;
         }
 
@@ -257,8 +410,8 @@ export component AppWindow inherits Window {
         }
 
         ButtonHint {
-            key: "B";
-            label: "Back";
+            key: "LT/RT";
+            label: "Jump";
             u: u;
         }
 
@@ -269,11 +422,46 @@ export component AppWindow inherits Window {
         }
     }
 
+    // --- Game sheet (⋯ / Y) ---
+    if sheet-open: Rectangle {
+        background: #00000080;
+        // Opens beside the ⋯ button and drops downward, so the game title stays visible.
+        Rectangle {
+            x: margin + 338 * u;
+            y: 650 * u;
+            width: 440 * u;
+            height: sheet-items.length * 68 * u + 24 * u;
+            border-radius: 18 * u;
+            background: #161b26f5;
+            border-width: 1px;
+            border-color: #ffffff1f;
+            drop-shadow-blur: 40 * u;
+            drop-shadow-color: #00000099;
+            for item[i] in sheet-items: Rectangle {
+                x: 12 * u;
+                y: 12 * u + i * 68 * u;
+                width: parent.width - 24 * u;
+                height: 64 * u;
+                border-radius: 12 * u;
+                background: i == sheet-index ? white : transparent;
+                Text {
+                    x: 22 * u;
+                    height: parent.height;
+                    text: item;
+                    font-size: 26 * u;
+                    color: i == sheet-index ? black : white;
+                    vertical-alignment: center;
+                }
+            }
+        }
+    }
+
+    // Messages sit in the empty band between the game row and the title, clear of every row.
     Rectangle {
-        x: (root.width - self.width) / 2;
-        y: root.height - 180 * u;
-        width: toast-text.preferred-width + 60 * u;
-        height: 64 * u;
+        x: root.width - margin - self.width;
+        y: 320 * u;
+        width: min(toast-text.preferred-width + 60 * u, root.width - 2 * margin);
+        height: 60 * u;
         border-radius: self.height / 2;
         background: #141a26f2;
         border-width: 1px;
@@ -281,11 +469,13 @@ export component AppWindow inherits Window {
         opacity: toast-visible ? 1 : 0;
         animate opacity { duration: 200ms; }
         toast-text := Text {
-            width: parent.width;
+            x: 30 * u;
+            width: parent.width - 60 * u;
             height: parent.height;
             text: toast;
             color: white;
-            font-size: 24 * u;
+            font-size: 22 * u;
+            overflow: elide;
             horizontal-alignment: center;
             vertical-alignment: center;
         }
@@ -327,6 +517,14 @@ export component AppWindow inherits Window {
             }
             if (event.text == Key.Tab) {
                 root.action(Action.tab-next);
+                return accept;
+            }
+            if (event.text == Key.PageUp) {
+                root.action(Action.page-prev);
+                return accept;
+            }
+            if (event.text == Key.PageDown) {
+                root.action(Action.page-next);
                 return accept;
             }
             if (event.text == Key.F1) {

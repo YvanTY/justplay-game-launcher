@@ -24,10 +24,6 @@ pub struct Launch {
 #[derive(Debug, Clone)]
 pub struct Game {
     /// Stable key for favorites and play history, e.g. `ps3:BLUS30405`.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "read by favorites and play history in steps 3-4")
-    )]
     pub id: String,
     pub title: String,
     /// Tab the game belongs to: "PC", "PS3", or a configured system name.

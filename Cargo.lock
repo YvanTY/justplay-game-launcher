@@ -1258,9 +1258,11 @@ version = "0.1.0"
 dependencies = [
  "sdl3-sys",
  "serde",
+ "serde_json",
  "slint",
  "slint-build",
  "toml",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

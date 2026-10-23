@@ -108,7 +108,7 @@ pub fn load(dir: &Path) -> Result<Config, String> {
     }
     let text =
         fs::read_to_string(&path).map_err(|e| format!("Could not read {}: {e}", path.display()))?;
-    parse(&text).map_err(|e| format!("config.toml: {e}"))
+    parse(crate::state::strip_bom(&text)).map_err(|e| format!("config.toml: {e}"))
 }
 
 pub fn parse(text: &str) -> Result<Config, String> {

@@ -1,7 +1,7 @@
 //! Controller input on its own SDL3 thread. It never touches the window, so it keeps
 //! running (and can watch for the return-to-launcher combo) while a game has focus.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::ffi::{CStr, CString, c_char};
 use std::time::{Duration, Instant};
 
@@ -20,18 +20,24 @@ const REPEAT_INTERVAL: Duration = Duration::from_millis(110);
 // Separate press/release thresholds stop a stick resting near the edge from chattering.
 const STICK_PRESS: i32 = 16_000;
 const STICK_RELEASE: i32 = 9_000;
+const TRIGGER_PRESS: i32 = 16_000;
+const TRIGGER_RELEASE: i32 = 8_000;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Source {
     Button(u32, u8),
     Stick(u32),
     Hat(u32),
+    Trigger(u32, u8),
 }
 
 impl Source {
     fn device(self) -> u32 {
         match self {
-            Source::Button(id, _) | Source::Stick(id) | Source::Hat(id) => id,
+            Source::Button(id, _)
+            | Source::Stick(id)
+            | Source::Hat(id)
+            | Source::Trigger(id, _) => id,
         }
     }
 }
@@ -68,6 +74,7 @@ fn run(emit: impl Fn(InputEvent)) {
         emit,
         held: None,
         sticks: HashMap::new(),
+        triggers: HashSet::new(),
         gamepads: HashMap::new(),
         joysticks: HashMap::new(),
     };
@@ -106,6 +113,8 @@ struct Pads<F: Fn(InputEvent)> {
     held: Option<Held>,
     sticks: HashMap<u32, (i32, i32)>,
     gamepads: HashMap<u32, *mut SDL_Gamepad>,
+    /// Triggers currently past the press threshold, keyed by (device, axis).
+    triggers: HashSet<(u32, u8)>,
     /// Devices SDL has no gamepad mapping for, read as raw joysticks.
     joysticks: HashMap<u32, *mut SDL_Joystick>,
 }
@@ -150,6 +159,12 @@ impl<F: Fn(InputEvent)> Pads<F> {
                     }
                     y if y == SDL_GAMEPAD_AXIS_LEFTY.0 => {
                         self.stick(a.which.0, None, Some(a.value as i32))
+                    }
+                    t if t == SDL_GAMEPAD_AXIS_LEFT_TRIGGER.0 => {
+                        self.trigger(a.which.0, a.axis, a.value as i32, Action::PagePrev)
+                    }
+                    t if t == SDL_GAMEPAD_AXIS_RIGHT_TRIGGER.0 => {
+                        self.trigger(a.which.0, a.axis, a.value as i32, Action::PageNext)
                     }
                     _ => {}
                 }
@@ -220,9 +235,20 @@ impl<F: Fn(InputEvent)> Pads<F> {
         }
     }
 
+    fn trigger(&mut self, id: u32, axis: u8, value: i32, action: Action) {
+        let pressed = self.triggers.contains(&(id, axis));
+        if !pressed && value >= TRIGGER_PRESS {
+            self.triggers.insert((id, axis));
+            self.press(Source::Trigger(id, axis), action);
+        } else if pressed && value < TRIGGER_RELEASE {
+            self.triggers.remove(&(id, axis));
+            self.release(Source::Trigger(id, axis));
+        }
+    }
+
     fn press(&mut self, source: Source, action: Action) {
         (self.emit)(InputEvent::Action(action));
-        if is_direction(action) {
+        if repeats(action) {
             self.held = Some(Held {
                 action,
                 source,
@@ -242,6 +268,7 @@ impl<F: Fn(InputEvent)> Pads<F> {
             self.held = None;
         }
         self.sticks.remove(&id);
+        self.triggers.retain(|&(device, _)| device != id);
     }
 
     fn stick(&mut self, id: u32, x: Option<i32>, y: Option<i32>) {
@@ -334,15 +361,23 @@ fn generic_button_action(button: u8) -> Option<Action> {
         2 => Action::Options,
         4 => Action::TabPrev,
         5 => Action::TabNext,
+        6 => Action::PagePrev,
+        7 => Action::PageNext,
         9 => Action::Menu,
         _ => return None,
     })
 }
 
-fn is_direction(action: Action) -> bool {
+/// Held directions and page jumps auto-repeat; everything else fires once per press.
+fn repeats(action: Action) -> bool {
     matches!(
         action,
-        Action::Up | Action::Down | Action::Left | Action::Right
+        Action::Up
+            | Action::Down
+            | Action::Left
+            | Action::Right
+            | Action::PagePrev
+            | Action::PageNext
     )
 }
 
