@@ -1,0 +1,14 @@
+/target
+/vendor/_dl
+.env
+*.log
+
+# From the SDL3 dev package, only the license and the x64 runtime + import lib are needed.
+/vendor/SDL3/*
+!/vendor/SDL3/LICENSE.txt
+!/vendor/SDL3/lib/
+/vendor/SDL3/lib/*
+!/vendor/SDL3/lib/x64/
+/vendor/SDL3/lib/x64/*
+!/vendor/SDL3/lib/x64/SDL3.dll
+!/vendor/SDL3/lib/x64/SDL3.lib

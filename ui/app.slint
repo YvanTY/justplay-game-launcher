@@ -1,0 +1,339 @@
+export enum Action { up, down, left, right, confirm, back, options, tab-prev, tab-next, menu }
+
+export struct Tile {
+    title: string,
+    subtitle: string,
+    color: color,
+}
+
+component Badge inherits Rectangle {
+    in property <string> label;
+    in property <length> u;
+    width: max(self.height, txt.preferred-width + 22 * u);
+    height: 40 * u;
+    border-radius: self.height / 2;
+    background: #ffffff1f;
+    border-width: 2 * u;
+    border-color: #ffffff66;
+    txt := Text {
+        width: parent.width;
+        height: parent.height;
+        text: label;
+        color: white;
+        font-size: 20 * u;
+        font-weight: 700;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+}
+
+component ButtonHint inherits HorizontalLayout {
+    in property <string> key;
+    in property <string> label;
+    in property <length> u;
+    spacing: 12 * u;
+    alignment: center;
+    VerticalLayout {
+        alignment: center;
+        Badge { label: key; u: u; }
+    }
+    Text {
+        text: label;
+        color: #ffffffd9;
+        font-size: 24 * u;
+        vertical-alignment: center;
+    }
+}
+
+component TabPill inherits Rectangle {
+    in property <string> label;
+    in property <int> count;
+    in property <bool> selected;
+    in property <bool> bar-focused;
+    in property <length> u;
+    border-radius: self.height / 2;
+    background: !selected ? transparent : bar-focused ? #2d8cff : #ffffff24;
+    animate background { duration: 150ms; }
+    horizontal-stretch: 0;
+    HorizontalLayout {
+        padding-left: 26 * u;
+        padding-right: 26 * u;
+        spacing: 10 * u;
+        Text {
+            text: label;
+            font-size: 30 * u;
+            font-weight: selected ? 700 : 500;
+            color: selected ? white : #ffffffa6;
+            vertical-alignment: center;
+        }
+
+        Text {
+            text: count;
+            font-size: 22 * u;
+            color: selected ? #ffffffcc : #ffffff66;
+            vertical-alignment: center;
+        }
+    }
+}
+
+component TileView inherits Rectangle {
+    in property <Tile> tile;
+    in property <bool> focused;
+    in property <length> u;
+    border-radius: 14 * u;
+    background: tile.color;
+    drop-shadow-blur: focused ? 30 * u : 0;
+    drop-shadow-color: #2d8cffb3;
+    Text {
+        x: 18 * u;
+        width: parent.width - 36 * u;
+        height: parent.height;
+        text: tile.title;
+        font-size: 28 * u;
+        font-weight: 700;
+        color: white;
+        wrap: word-wrap;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+    // Focus ring sits on top so it stays visible over bright art.
+    Rectangle {
+        border-radius: parent.border-radius;
+        border-width: focused ? 5 * u : 0;
+        border-color: white;
+    }
+}
+
+export component AppWindow inherits Window {
+    title: "Game Launcher";
+    background: #04060b;
+    default-font-family: "Segoe UI";
+    preferred-width: 1600px;
+    preferred-height: 900px;
+
+    in property <[string]> tabs;
+    in property <[int]> tab-counts;
+    in property <int> current-tab;
+    in property <bool> in-tabs;
+    in property <[Tile]> tiles;
+    in property <int> selected;
+    in property <int> columns: 5;
+    in property <string> toast;
+    in property <bool> toast-visible;
+
+    callback action(Action);
+    callback notify(string);
+
+    // 1px at 1080p; everything scales with the screen.
+    property <length> u: min(root.width / 1920, root.height / 1080);
+    property <length> margin: 96 * u;
+    property <length> gap: 24 * u;
+    property <length> grid-width: root.width - 2 * margin;
+    property <length> tile-w: (grid-width - (columns - 1) * gap) / columns;
+    property <length> tile-h: tile-w * 9 / 16;
+    property <length> row-h: tile-h + gap;
+    property <int> focus-row: Math.floor(selected / columns);
+    // Keep one row above the focused one visible so the grid never feels like it jumped.
+    property <int> scroll-row: Math.max(0, focus-row - 1);
+    property <Tile> focused-tile: tiles[selected];
+
+    // Stand-in for the focused game's hero art (step 3): its color fills the screen.
+    Rectangle {
+        background: focused-tile.color.darker(0.35);
+        animate background { duration: 450ms; easing: ease-in-out; }
+    }
+
+    Rectangle {
+        background: @linear-gradient(90deg, #04060bf0 0%, #04060b99 45%, #04060b33 100%);
+    }
+
+    Rectangle {
+        background: @linear-gradient(0deg, #04060bff 0%, #04060b00 60%);
+    }
+
+    HorizontalLayout {
+        x: margin - 6 * u;
+        y: 44 * u;
+        height: 64 * u;
+        spacing: 14 * u;
+        alignment: start;
+        VerticalLayout {
+            alignment: center;
+            Badge { label: "LB"; u: u; }
+        }
+
+        for name[i] in tabs: TabPill {
+            label: name;
+            count: tab-counts[i];
+            selected: i == current-tab;
+            bar-focused: in-tabs;
+            u: u;
+        }
+        VerticalLayout {
+            alignment: center;
+            Badge { label: "RB"; u: u; }
+        }
+    }
+
+    VerticalLayout {
+        x: margin;
+        y: 180 * u;
+        width: grid-width * 0.7;
+        height: 200 * u;
+        alignment: start;
+        spacing: 6 * u;
+        Text {
+            text: focused-tile.title;
+            font-size: 76 * u;
+            font-weight: 800;
+            color: white;
+            overflow: elide;
+        }
+
+        Text {
+            text: focused-tile.subtitle;
+            font-size: 28 * u;
+            color: #ffffffb3;
+        }
+    }
+
+    Rectangle {
+        // Extra room around the grid so the enlarged focused tile and its glow aren't clipped.
+        x: margin - 30 * u;
+        y: 420 * u;
+        width: grid-width + 60 * u;
+        height: root.height - self.y - 110 * u;
+        clip: true;
+        Rectangle {
+            x: 30 * u;
+            // Top inset must stay below `gap` or the bottom of the row above peeks in.
+            y: 20 * u - scroll-row * row-h;
+            width: grid-width;
+            height: parent.height;
+            animate y { duration: 220ms; easing: ease-out; }
+            for tile[i] in tiles: TileView {
+                property <length> grow: i == selected && !in-tabs ? tile-w * 0.07 : 0px;
+                tile: tile;
+                focused: i == selected && !in-tabs;
+                u: u;
+                x: Math.mod(i, columns) * (tile-w + gap) - self.grow / 2;
+                y: Math.floor(i / columns) * row-h - self.grow * 9 / 32;
+                width: tile-w + self.grow;
+                height: tile-h + self.grow * 9 / 16;
+                // The partly visible row below the two full rows is dimmed so the cut edge reads as "more below".
+                opacity: Math.floor(i / columns) >= scroll-row + 2 ? 0.35 : 1;
+                animate x, y, width, height, opacity { duration: 140ms; easing: ease-out; }
+            }
+        }
+
+    }
+
+    HorizontalLayout {
+        x: margin;
+        y: root.height - 84 * u;
+        width: grid-width;
+        height: 48 * u;
+        alignment: end;
+        spacing: 40 * u;
+        ButtonHint {
+            key: "A";
+            label: in-tabs ? "Open" : "Play";
+            u: u;
+        }
+
+        ButtonHint {
+            key: "Y";
+            label: "Options";
+            u: u;
+        }
+
+        ButtonHint {
+            key: "B";
+            label: "Back";
+            u: u;
+        }
+
+        ButtonHint {
+            key: "≡";
+            label: "Menu";
+            u: u;
+        }
+    }
+
+    Rectangle {
+        x: (root.width - self.width) / 2;
+        y: root.height - 180 * u;
+        width: toast-text.preferred-width + 60 * u;
+        height: 64 * u;
+        border-radius: self.height / 2;
+        background: #141a26f2;
+        border-width: 1px;
+        border-color: #ffffff26;
+        opacity: toast-visible ? 1 : 0;
+        animate opacity { duration: 200ms; }
+        toast-text := Text {
+            width: parent.width;
+            height: parent.height;
+            text: toast;
+            color: white;
+            font-size: 24 * u;
+            horizontal-alignment: center;
+            vertical-alignment: center;
+        }
+    }
+
+    keys := FocusScope {
+        key-pressed(event) => {
+            if (event.text == Key.UpArrow) {
+                root.action(Action.up);
+                return accept;
+            }
+            if (event.text == Key.DownArrow) {
+                root.action(Action.down);
+                return accept;
+            }
+            if (event.text == Key.LeftArrow) {
+                root.action(Action.left);
+                return accept;
+            }
+            if (event.text == Key.RightArrow) {
+                root.action(Action.right);
+                return accept;
+            }
+            if (event.text == Key.Return) {
+                root.action(Action.confirm);
+                return accept;
+            }
+            if (event.text == Key.Escape || event.text == Key.Backspace) {
+                root.action(Action.back);
+                return accept;
+            }
+            if (event.text == Key.Space) {
+                root.action(Action.options);
+                return accept;
+            }
+            if (event.text == Key.Backtab || (event.text == Key.Tab && event.modifiers.shift)) {
+                root.action(Action.tab-prev);
+                return accept;
+            }
+            if (event.text == Key.Tab) {
+                root.action(Action.tab-next);
+                return accept;
+            }
+            if (event.text == Key.F1) {
+                root.action(Action.menu);
+                return accept;
+            }
+            return reject;
+        }
+    }
+
+    // Controller-first: the mouse pointer is hidden over the launcher.
+    TouchArea {
+        mouse-cursor: none;
+    }
+
+    init => {
+        keys.focus();
+    }
+}
