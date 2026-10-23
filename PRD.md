@@ -8,41 +8,50 @@ Playnite launches games fine, but everything else (menus, settings, managing the
 2. **Featherweight.** Idle CPU ≈ 0%. While a game runs, the launcher stops drawing, frees its images and pauses audio.
 3. **Any controller.** Xbox, PlayStation, Switch Pro and generic USB/DirectInput pads (e.g. UCom), with hot-plugging.
 
-## Look & feel — BuzzTV structure, PS5 atmosphere
+## Look & feel — PS5 home layout (BuzzTV quick panel)
+Changed after the step 1 test: Yvan prefers the full PS5 layout over the BuzzTV grid. Reference: the PS5 home screen screenshots Yvan shared (Ratchet & Clank / Spider-Man home).
 ```
 ┌──────────────────────────────────────────────────────────────────┐
-│ [LB]  Home   PC   SNES   PS2   Favorites  [RB]          22:41  ☰ │  ← tabs (LB/RB)
+│  Home   PC 12   SNES 30   PS2 7   Favorites        ⚙   10:42 PM  │  ← text tabs, active = bold white
+│ ┏━━━━━━┓┌──┐┌──┐┌──┐┌──┐┌──┐┌──┐┌──┐┌──┐┌──┐┌──┐                 │  ← small rounded square icons,
+│ ┃      ┃└──┘└──┘└──┘└──┘└──┘└──┘└──┘└──┘└──┘└──┘                 │     selected one larger on a
+│ ┗━━━━━━┛ Ratchet & Clank: Rift Apart                             │     dark glass backing + its name
 │                                                                  │
-│  ELDEN RING                                   ┌──── quick panel ─┐│
-│  PC · Last played yesterday                   │ ⚙ Settings  ⟳ Scan││  ← Menu button
-│                                               │ 🎮 Pads   ⏻ Power ││     opens it
-│  ┌━━━━━━━━┓ ┌────────┐ ┌────────┐ ┌────────┐ │ ✕ Exit           ││
-│  ┃ focused┃ │        │ │        │ │        │ └──────────────────┘│
-│  ┗━━━━━━━━┛ └────────┘ └────────┘ └────────┘                     │  ← grid of wide tiles
-│  ┌────────┐ ┌────────┐ ┌────────┐ ┌────────┐                     │
-│  └────────┘ └────────┘ └────────┘ └────────┘                     │
-│   (focused game's hero art fills the whole background, dimmed)   │
+│                                                                  │
+│   ██████ RATCHET & CLANK ██████                                  │  ← big game logo (or big title)
+│                                                                  │
+│   ( ▶  Play )  ( ⋯ )    PC · Last played yesterday              │  ← action buttons + info
+│                                                                  │
+│   Recently played                                                │
+│   ┌────────┐ ┌────────┐ ┌────────┐ ┌────────┐ ┌────────┐         │  ← wide 16:9 cards
+│   └────────┘ └────────┘ └────────┘ └────────┘ └────────┘         │
+│      (selected game's hero art fills the whole screen)           │
 └──────────────────────────────────────────────────────────────────┘
 ```
-- **Background:** the focused game's hero art fills the screen behind a dark gradient and crossfades when focus moves (PS5).
-- **Music:** if the focused game has music, it fades in. Otherwise a quiet ambient bed plays (PS5).
-- **Tabs:** **Home** (recently played first, then everything), **PC** (Steam + manual), one tab per emulator system, and **Favorites**. Empty tabs are hidden (BuzzTV).
-- **Grid:** wide 16:9 tiles with a thick bright outline and a slight scale-up on focus (BuzzTV).
-- **Quick panel:** a slide-in panel of large square buttons (BuzzTV): Settings, Rescan library, Controller test, Power (Sleep / Restart / Shut down), Exit launcher, plus a clock.
-- **Game sheet:** Y on a game opens Play / Add to (or Remove from) Favorites.
+- **Top bar:** plain text tabs like PS5's "Games / Media". The active tab is bold white, the others dim, with small game counts. On the right are a gear (opens the quick panel) and the clock. No pills or boxes. No search in v0.1.
+- **Bottom row:** "Recently played" as wide cards using each game's art (up to 8). Down from the buttons moves into it, and A launches. *(Builder's call: PS5 shows news cards here. Recently played is the nearest useful thing for a local launcher.)*
+- **Background:** the selected game's hero art fills the screen behind a soft dark gradient (left and bottom) and crossfades when the selection moves. No art: a blurred, darkened version of its icon.
+- **Game row:** square icons (PS3 ICON0, emulator box art or user art, cropped to fill). The selected icon is larger, with a bright outline and its name to the right. The row slides so the selection always sits in the first slot, as on PS5.
+- **Logo & actions:** the game's logo image (PS3 games provide PIC0, or user art), otherwise its title in large type. Below it, a big **Play** button and a **⋯** button that opens the game sheet. Then an info line (platform, last played).
+- **Music:** if the selected game has music, it fades in. Otherwise a quiet ambient bed plays.
+- **Tabs:** **Home** (recently played first, then everything), **PC** (manual entries), one tab per emulator system, and **Favorites**. Empty tabs are hidden. Each shows its game count.
+- **Quick panel (from BuzzTV):** a slide-in panel of large square buttons: Settings, Rescan library, Controller test, Power (Sleep / Restart / Shut down), Exit launcher, plus a clock.
+- **Game sheet:** ⋯ or Y opens Play / Add to (or Remove from) Favorites.
 
 ### Controls
 | Button | Action |
 |---|---|
-| D-pad / left stick | Move |
-| A | Launch / confirm |
+| Left / right (D-pad or stick) | Move along the game row |
+| Down / up | Icon row → Play / ⋯ buttons → Recently played cards, and back. Up from the icon row → tab bar |
+| A | Launch (on an icon or Play) / confirm |
 | B | Back / close |
 | Y | Game sheet |
 | LB / RB | Previous / next tab |
+| LT / RT | Jump a page (8 games) left / right |
 | Menu (Start) | Quick panel |
 | Hold Start + Select for 1 s (in game) | Bring launcher to front |
 
-Keyboard fallback: arrows, Enter, Esc, Tab / Shift+Tab, F1 (panel).
+Keyboard fallback: arrows, Enter, Esc/Backspace, Space (game sheet), Tab / Shift+Tab, Page Up / Page Down, F1 (panel).
 
 ## Stack
 | Layer | Choice |
@@ -55,22 +64,22 @@ Keyboard fallback: arrows, Enter, Esc, Tab / Shift+Tab, F1 (panel).
 | Sounds | Synthesized in code, so no copyrighted assets |
 
 ## v0.1 scope (MVP)
-1. The home screen, tabs, grid, background art, quick panel and game sheet as described above.
-2. **Steam library:** detect installed games automatically from Steam's files. Use the artwork Steam already caches locally (tile = header image, background = hero image), so no API keys are needed.
+1. The home screen, tabs, game row, background art, quick panel and game sheet as described above.
+2. **RPCS3 (PS3) import:** read RPCS3's own game list (`config/games.yml`) plus games installed inside RPCS3 (`dev_hdd0/game`, category HG). Titles come from `PARAM.SFO`; art from the game's own `ICON0.PNG` (icon), `PIC1.PNG` (background) and `PIC0.PNG` (logo). A `hide` list in the config removes entries. *(Replaced the Steam scanner: Steam isn't installed on Yvan's PC.)*
 3. **Emulators:** in `config.toml`, each system lists its name, ROM folder, file extensions, emulator exe and argument template (e.g. `-L cores/snes.dll "{rom}"`). Art is loaded from `<artdir>/<rom name>.png|jpg` if present. Without art, a styled title tile is shown.
 4. **Manual games:** list any .exe in `config.toml` with a name and optional art.
-5. **Launch & return:** launch a game, hide the launcher and drop to near-zero resources. Detect the game's exit (process watch, including games started through Steam) and come back automatically. Hold Start + Select to force-return.
+5. **Launch & return:** launch a game, hide the launcher and drop to near-zero resources. Detect the game's exit (process watch, including games that start a second process) and come back automatically. Hold Start + Select to force-return.
 6. **Settings page (controller-driven):** master volume, music volume, UI sounds on/off and art dim level. Left/right change values. Saved immediately.
 7. **Per-game music:** `music/<game id>.ogg|mp3` fades in on focus.
 8. **Controller test page:** live inputs for each connected pad, to verify generic pads.
 
 ## Not in v0.1
-Epic, GOG, Xbox/Game Pass, EA and Ubisoft libraries · online metadata or art scraping · video trailers · an in-game overlay · themes · adding games or editing rows from inside the app (v0.2) · installers or auto-update.
+Steam, Epic, GOG, Xbox/Game Pass, EA and Ubisoft libraries · online metadata or art scraping · video trailers · an in-game overlay · themes · adding games or editing rows from inside the app (v0.2) · installers or auto-update.
 
 ## Build order (each milestone is committed and tested before the next)
 1. **Skeleton:** Rust project, fullscreen Slint window, SDL3 controller input driving focus on a dummy grid, keyboard fallback.
-2. **Library:** config loading, Steam scan, emulator and manual entries, and the art cache, with unit tests.
-3. **Home UI:** tabs, grid, background art crossfade, and the game sheet.
+2. **Library:** config loading, RPCS3 import, folder-scanned emulators and manual entries, with unit tests. (The art cache moves to step 7.)
+3. **Home UI (PS5 layout):** tabs, game row, logo and action buttons, background art crossfade, and the game sheet.
 4. **Launch & return:** process launch and tracking, hide/sleep while in game, the Start + Select return combo, and last-played tracking.
 5. **Sound:** synthesized UI sounds, ambient bed and per-game music crossfade.
 6. **Quick panel, Settings, Controller test, Power actions.**
@@ -84,6 +93,6 @@ Epic, GOG, Xbox/Game Pass, EA and Ubisoft libraries · online metadata or art sc
 
 ## Definition of done (v0.1)
 - `cargo build --release`, `cargo clippy -- -D warnings` and `cargo test` all pass.
-- Unit tests cover Steam manifest parsing, emulator command templates and config loading.
+- Unit tests cover PARAM.SFO and games.yml parsing, emulator command templates and config loading.
 - Manual checklist passed on Yvan's PC: navigate, launch, auto-return and use the quick panel with (a) an Xbox-style pad and (b) the UCom pad. Measure CPU and RAM with Task Manager on the home screen and during a game.
 - Committed via `/commit`.

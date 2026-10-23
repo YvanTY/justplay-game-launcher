@@ -1,16 +1,19 @@
 // Release builds run without a console window; debug builds keep it for logs.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod config;
 mod input;
+mod library;
 mod nav;
 
 use std::cell::RefCell;
 use std::rc::Rc;
 use std::time::Duration;
 
-use slint::{Color, ModelRc, SharedString, Timer, VecModel};
+use slint::{Color, Image, ModelRc, SharedString, Timer, VecModel};
 
 use input::InputEvent;
+use library::{Game, Library};
 use nav::{Dir, Move};
 
 slint::include_modules!();
@@ -19,12 +22,15 @@ const COLUMNS: usize = 5;
 const TOAST_DURATION: Duration = Duration::from_millis(2600);
 
 struct Tab {
-    name: &'static str,
+    name: String,
     tiles: Vec<Tile>,
+    /// Index into `State::games` for each tile.
+    games: Vec<usize>,
     focus: usize,
 }
 
 struct State {
+    games: Vec<Game>,
     tabs: Vec<Tab>,
     current: usize,
     in_tabs: bool,
@@ -39,19 +45,51 @@ impl State {
     fn tab_mut(&mut self) -> &mut Tab {
         &mut self.tabs[self.current]
     }
+
+    fn focused_game(&self) -> Option<&Game> {
+        let tab = self.tab();
+        tab.games.get(tab.focus).map(|&i| &self.games[i])
+    }
 }
 
 fn main() -> Result<(), slint::PlatformError> {
     let ui = AppWindow::new()?;
+    let data_dir = config::data_dir();
+    let mut problems = Vec::new();
+    let library = match config::load(&data_dir) {
+        Ok(config) => library::load(&config, &data_dir.join("art")),
+        Err(e) => {
+            problems.push(e);
+            Library {
+                games: Vec::new(),
+                warnings: Vec::new(),
+            }
+        }
+    };
+    problems.extend(library.warnings.iter().cloned());
+    if library.games.is_empty() && problems.is_empty() {
+        problems.push(format!(
+            "No games yet: add them in {}",
+            data_dir.join("config.toml").display()
+        ));
+    }
+    let tabs = build_tabs(&library.games, &mut problems);
+
     let state = Rc::new(RefCell::new(State {
-        tabs: demo_tabs(),
+        games: library.games,
+        tabs,
         current: 0,
         in_tabs: false,
         toast_timer: Timer::default(),
     }));
 
     ui.set_columns(COLUMNS as i32);
-    let names: Vec<SharedString> = state.borrow().tabs.iter().map(|t| t.name.into()).collect();
+    let names: Vec<SharedString> = state
+        .borrow()
+        .tabs
+        .iter()
+        .map(|t| t.name.as_str().into())
+        .collect();
     ui.set_tabs(ModelRc::new(VecModel::from(names)));
     let counts: Vec<i32> = state
         .borrow()
@@ -61,6 +99,16 @@ fn main() -> Result<(), slint::PlatformError> {
         .collect();
     ui.set_tab_counts(ModelRc::new(VecModel::from(counts)));
     load_tab(&ui, &state.borrow());
+    for problem in &problems {
+        eprintln!("[library] {problem}");
+    }
+    if let Some(first) = problems.first() {
+        let more = match problems.len() {
+            1 => String::new(),
+            n => format!(" (+{} more)", n - 1),
+        };
+        show_toast(&ui, &state.borrow(), format!("{first}{more}").into());
+    }
 
     ui.on_action({
         let weak = ui.as_weak();
@@ -122,17 +170,17 @@ fn handle_action(ui: &AppWindow, state: &mut State, action: Action) {
             Action::TabNext => switch_tab(ui, state, 1),
             Action::Back => state.in_tabs = true,
             Action::Confirm => {
-                let title = state
-                    .tab()
-                    .tiles
-                    .get(state.tab().focus)
-                    .map(|t| t.title.clone())
-                    .unwrap_or_default();
-                show_toast(
-                    ui,
-                    state,
-                    format!("Launching {title} arrives in step 4").into(),
-                );
+                // Until launching lands in step 4, show the exact command it will run.
+                if let Some(game) = state.focused_game() {
+                    let exe = game
+                        .launch
+                        .exe
+                        .file_name()
+                        .unwrap_or_default()
+                        .to_string_lossy();
+                    let text = format!("Step 4 will run: {exe} {}", game.launch.args.join(" "));
+                    show_toast(ui, state, text.into());
+                }
             }
             Action::Options => show_toast(ui, state, "The game sheet arrives in step 3".into()),
             Action::Menu => show_toast(ui, state, "The quick panel arrives in step 6".into()),
@@ -170,29 +218,70 @@ fn show_toast(ui: &AppWindow, state: &State, text: SharedString) {
         });
 }
 
-/// Placeholder library until the real scanners land in step 2.
-fn demo_tabs() -> Vec<Tab> {
-    [
-        ("Home", 23),
-        ("PC", 12),
-        ("SNES", 30),
-        ("PS2", 7),
-        ("Favorites", 4),
-    ]
-    .into_iter()
-    .enumerate()
-    .map(|(tab_index, (name, count))| Tab {
-        name,
+/// Home holds everything; then one tab per platform in a fixed, familiar order.
+fn build_tabs(games: &[Game], problems: &mut Vec<String>) -> Vec<Tab> {
+    let tiles: Vec<Tile> = games.iter().map(|g| make_tile(g, problems)).collect();
+    let mut platforms: Vec<&str> = Vec::new();
+    for game in games {
+        if !platforms.contains(&game.platform.as_str()) {
+            platforms.push(&game.platform);
+        }
+    }
+    platforms.sort_by_key(|p| match *p {
+        "PC" => 0,
+        "PS3" => 1,
+        _ => 2,
+    });
+
+    let all: Vec<usize> = (0..games.len()).collect();
+    let mut tabs = vec![Tab {
+        name: "Home".into(),
+        tiles: tiles.clone(),
+        games: all,
         focus: 0,
-        tiles: (0..count)
-            .map(|i| Tile {
-                title: format!("{name} Game {}", i + 1).into(),
-                subtitle: format!("{name} · demo tile").into(),
-                color: hsv_color((tab_index * 67 + i * 23) as f32 % 360.0, 0.55, 0.62),
-            })
-            .collect(),
-    })
-    .collect()
+    }];
+    for platform in platforms {
+        let indices: Vec<usize> = (0..games.len())
+            .filter(|&i| games[i].platform == platform)
+            .collect();
+        let platform_tiles = indices.iter().map(|&i| tiles[i].clone()).collect();
+        tabs.push(Tab {
+            name: platform.into(),
+            tiles: platform_tiles,
+            games: indices,
+            focus: 0,
+        });
+    }
+    tabs
+}
+
+fn make_tile(game: &Game, problems: &mut Vec<String>) -> Tile {
+    let icon = game
+        .art
+        .icon
+        .as_ref()
+        .and_then(|path| match Image::load_from_path(path) {
+            Ok(image) => Some(image),
+            Err(_) => {
+                problems.push(format!("{}: could not load {}", game.title, path.display()));
+                None
+            }
+        });
+    Tile {
+        title: game.title.as_str().into(),
+        subtitle: game.platform.as_str().into(),
+        color: title_color(&game.title),
+        has_icon: icon.is_some(),
+        icon: icon.unwrap_or_default(),
+    }
+}
+
+/// Stable per-title color for games without art, so each one stays recognisable.
+fn title_color(title: &str) -> Color {
+    let hash = title
+        .bytes()
+        .fold(2166136261u32, |h, b| (h ^ b as u32).wrapping_mul(16777619));
+    hsv_color((hash % 360) as f32, 0.5, 0.55)
 }
 
 fn hsv_color(hue: f32, saturation: f32, value: f32) -> Color {

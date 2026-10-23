@@ -4,6 +4,8 @@ export struct Tile {
     title: string,
     subtitle: string,
     color: color,
+    icon: image,
+    has-icon: bool,
 }
 
 component Badge inherits Rectangle {
@@ -84,7 +86,14 @@ component TileView inherits Rectangle {
     background: tile.color;
     drop-shadow-blur: focused ? 30 * u : 0;
     drop-shadow-color: #2d8cffb3;
-    Text {
+    clip: true;
+    if tile.has-icon: Image {
+        width: parent.width;
+        height: parent.height;
+        source: tile.icon;
+        image-fit: cover;
+    }
+    if !tile.has-icon: Text {
         x: 18 * u;
         width: parent.width - 36 * u;
         height: parent.height;

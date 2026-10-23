@@ -1257,8 +1257,10 @@ name = "game-launcher"
 version = "0.1.0"
 dependencies = [
  "sdl3-sys",
+ "serde",
  "slint",
  "slint-build",
+ "toml",
 ]
 
 [[package]]
