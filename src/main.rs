@@ -122,6 +122,13 @@ struct App {
     repeated_click: bool,
     /// Hides the mouse pointer once it stops moving.
     pointer_timer: Timer,
+    /// The action being handled came from a pad (not the keyboard, the mouse or a hint).
+    pad_input: bool,
+    /// Controllers screen: when each held pad button (index in controllers::ALL) went down,
+    /// the holds whose action already ran (until released), and the timer that times them.
+    held_since: HashMap<usize, std::time::Instant>,
+    holds_done: HashSet<usize>,
+    hold_timer: Timer,
 }
 
 fn main() -> Result<(), slint::PlatformError> {
@@ -218,6 +225,10 @@ fn main() -> Result<(), slint::PlatformError> {
         last_click: None,
         repeated_click: false,
         pointer_timer: Timer::default(),
+        pad_input: false,
+        held_since: HashMap::new(),
+        holds_done: HashSet::new(),
+        hold_timer: Timer::default(),
     }));
 
     {
@@ -260,6 +271,24 @@ fn main() -> Result<(), slint::PlatformError> {
             }
             handle_action(&ui, &app, action);
         }
+    });
+    ui.on_pad_action({
+        let weak = ui.as_weak();
+        let app = app.clone();
+        move |action| {
+            let ui = weak.unwrap();
+            if ui.global::<Mouse>().get_visible() {
+                ui.global::<Mouse>().set_visible(false);
+            }
+            app.borrow_mut().pad_input = true;
+            handle_action(&ui, &app, action);
+            app.borrow_mut().pad_input = false;
+        }
+    });
+    ui.on_hold_tick({
+        let weak = ui.as_weak();
+        let app = app.clone();
+        move || hold_tick(&weak.unwrap(), &mut app.borrow_mut())
     });
     let mouse = ui.global::<Mouse>();
     mouse.on_act({
@@ -346,7 +375,7 @@ fn main() -> Result<(), slint::PlatformError> {
         let _ = slint::invoke_from_event_loop(move || {
             let Some(ui) = weak.upgrade() else { return };
             match event {
-                Some(InputEvent::Action(action)) => ui.invoke_action(action),
+                Some(InputEvent::Action(action)) => ui.invoke_pad_action(action),
                 Some(InputEvent::Notice(text)) => ui.invoke_notify(text.into()),
                 Some(InputEvent::HomeCombo) => ui.invoke_home_combo(),
                 Some(InputEvent::BackReleased) => ui.invoke_back_released(),
@@ -2052,6 +2081,16 @@ fn handle_controllers_action(ui: &AppWindow, app: &mut App, action: Action) {
     if app.capturing {
         return;
     }
+    // On the pad these buttons work by holding them (see hold_tick): a quick press only lights
+    // the button up, so every button can be tested.
+    if app.pad_input
+        && matches!(
+            action,
+            Action::Confirm | Action::Back | Action::Options | Action::TabPrev | Action::TabNext
+        )
+    {
+        return;
+    }
     let before = (app.remap_selected, app.pad_index);
     let sound = match action {
         Action::Up | Action::Down | Action::Left | Action::Right => {
@@ -2067,23 +2106,9 @@ fn handle_controllers_action(ui: &AppWindow, app: &mut App, action: Action) {
             app.pad_index = nav::wrap_index(app.pad_index, app.pads.len(), delta);
             Some(Sound::Tab)
         }
-        Action::Confirm if app.pads.get(app.pad_index).is_some() => {
-            app.capturing = true;
-            input::CAPTURE.store(true, Ordering::Relaxed);
-            Some(Sound::Confirm)
-        }
-        Action::Confirm => {
-            app.toasts.show(ui, "Connect a controller first".into());
-            None
-        }
+        Action::Confirm => start_capture(ui, app),
         Action::Options => {
-            let button = controllers::ALL[app.remap_selected];
-            if let Some(pad) = app.pads.get(app.pad_index)
-                && let Some(profile) = app.home.state.controller_remaps.get_mut(&pad.guid)
-            {
-                profile.clear(button);
-            }
-            save_remaps(ui, app);
+            clear_selected(ui, app);
             Some(Sound::Back)
         }
         // Leaving needs B held for BACK_HOLD, so a stray press doesn't throw away the screen.
@@ -2107,7 +2132,150 @@ fn handle_controllers_action(ui: &AppWindow, app: &mut App, action: Action) {
     sync_controllers_screen(ui, app);
 }
 
-const BACK_HOLD: Duration = Duration::from_secs(3);
+/// Holding Esc on the keyboard to leave the Controllers screen (the pad's B uses hold_tick).
+const BACK_HOLD: Duration = Duration::from_secs(2);
+
+/// Waits for the next key or pad button, which becomes an extra trigger for the selected row.
+fn start_capture(ui: &AppWindow, app: &mut App) -> Option<Sound> {
+    if app.pads.get(app.pad_index).is_none() {
+        app.toasts.show(ui, "Connect a controller first".into());
+        return None;
+    }
+    app.capturing = true;
+    input::CAPTURE.store(true, Ordering::Relaxed);
+    Some(Sound::Confirm)
+}
+
+fn clear_selected(ui: &AppWindow, app: &mut App) {
+    let button = controllers::ALL[app.remap_selected];
+    if let Some(pad) = app.pads.get(app.pad_index)
+        && let Some(profile) = app.home.state.controller_remaps.get_mut(&pad.guid)
+    {
+        profile.clear(button);
+    }
+    save_remaps(ui, app);
+}
+
+/// The pad's held buttons changed (Controllers screen): note when each went down.
+fn track_holds(ui: &AppWindow, app: &mut App, mask: u32) {
+    let now = std::time::Instant::now();
+    for i in 0..controllers::ALL.len() {
+        if mask & (1 << i) != 0 {
+            app.held_since.entry(i).or_insert(now);
+        } else {
+            app.held_since.remove(&i);
+            app.holds_done.remove(&i);
+        }
+    }
+    if app.held_since.is_empty() {
+        app.hold_timer.stop();
+    } else if !app.hold_timer.running() {
+        let weak = ui.as_weak();
+        app.hold_timer
+            .start(TimerMode::Repeated, Duration::from_millis(30), move || {
+                if let Some(ui) = weak.upgrade() {
+                    ui.invoke_hold_tick();
+                }
+            });
+    }
+    hold_tick(ui, app);
+}
+
+/// Runs a held button's action once its time is up, and shows how far along the hold is.
+fn hold_tick(ui: &AppWindow, app: &mut App) {
+    if app.menus.overlay != Overlay::Controllers || app.capturing {
+        app.held_since.clear();
+        app.hold_timer.stop();
+        show_hold(ui, None);
+        return;
+    }
+    // The hold closest to its goal is the one shown (and the one that fires).
+    let pads = app.pads.len();
+    let leading = app
+        .held_since
+        .iter()
+        .filter(|(i, _)| !app.holds_done.contains(i))
+        .filter_map(|(&i, since)| {
+            let (action, needed) = controllers::hold_action(i, pads)?;
+            Some((
+                i,
+                action,
+                since.elapsed().as_secs_f32() / needed.as_secs_f32(),
+            ))
+        })
+        .max_by(|a, b| a.2.total_cmp(&b.2));
+    let Some((index, action, progress)) = leading else {
+        show_hold(ui, None);
+        return;
+    };
+    if progress < 1.0 {
+        // A quick test press shouldn't flash a progress bar.
+        let held = app.held_since[&index].elapsed();
+        let visible = held > Duration::from_millis(200);
+        show_hold(ui, visible.then_some((index, action, progress)));
+        return;
+    }
+    app.holds_done.insert(index);
+    show_hold(ui, None);
+    match action {
+        controllers::HoldAction::Leave => leave_controllers_screen(ui, app),
+        controllers::HoldAction::AddToSelected => {
+            if let Some(sound) = start_capture(ui, app) {
+                play_sound(app, sound);
+            }
+        }
+        controllers::HoldAction::ClearSelected => {
+            clear_selected(ui, app);
+            let label = controllers::ALL[app.remap_selected].label();
+            app.toasts
+                .show(ui, format!("{label}: extra triggers cleared"));
+            play_sound(app, Sound::Back);
+        }
+        controllers::HoldAction::SwitchPad(delta) => {
+            app.pad_index = nav::wrap_index(app.pad_index, app.pads.len(), delta);
+            play_sound(app, Sound::Tab);
+        }
+        controllers::HoldAction::Remap(button) => {
+            app.remap_selected = button;
+            if let Some(sound) = start_capture(ui, app) {
+                play_sound(app, sound);
+            }
+        }
+    }
+    push_menus(ui, app);
+    sync_controllers_screen(ui, app);
+}
+
+/// The hold bar (and B's ring) on the Controllers screen.
+fn show_hold(ui: &AppWindow, hold: Option<(usize, controllers::HoldAction, f32)>) {
+    let Some((index, action, progress)) = hold else {
+        ui.set_hold_progress(0.0);
+        ui.set_back_progress(0.0);
+        return;
+    };
+    let button = controllers::ALL[index].badge();
+    let text = match action {
+        controllers::HoldAction::Leave => {
+            ui.set_back_progress(progress.min(0.999));
+            ui.set_hold_progress(0.0);
+            return;
+        }
+        controllers::HoldAction::AddToSelected => {
+            format!("Keep holding {button} to add a key or button to the selected row")
+        }
+        controllers::HoldAction::ClearSelected => {
+            format!("Keep holding {button} to clear the extra triggers")
+        }
+        controllers::HoldAction::SwitchPad(_) => {
+            format!("Keep holding {button} to show the other controller")
+        }
+        controllers::HoldAction::Remap(_) => {
+            format!("Keep holding {button} to give it a new key or button")
+        }
+    };
+    ui.set_hold_text(text.into());
+    ui.set_hold_progress(progress.clamp(0.01, 1.0));
+}
 
 /// Fills the ring around the B badge; leaves the Controllers screen once it is full.
 fn back_hold_tick(ui: &AppWindow, app: &mut App) {
@@ -2143,6 +2311,7 @@ fn drain_controller_events(ui: &AppWindow, app: &mut App) {
                     .map(|i| mask & (1 << i) != 0)
                     .collect();
                 ui.set_live(ModelRc::new(VecModel::from(live)));
+                track_holds(ui, app, mask);
             }
             InputEvent::Captured(trigger) if app.capturing => {
                 app.capturing = false;

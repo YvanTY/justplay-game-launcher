@@ -4,6 +4,7 @@
 
 use std::collections::{BTreeMap, HashMap};
 use std::sync::{LazyLock, RwLock};
+use std::time::Duration;
 
 use sdl3_sys::everything::*;
 use serde::{Deserialize, Serialize};
@@ -267,6 +268,39 @@ impl Profile {
 pub static REMAPS: LazyLock<RwLock<HashMap<String, Profile>>> = LazyLock::new(Default::default);
 
 /// Cursor movement through the three lists in all four directions.
+/// What holding a pad button does on the Controllers screen. A quick press only lights the
+/// button up, so every button can be tested without leaving or changing anything.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HoldAction {
+    Leave,
+    /// Add a key or button to the selected row.
+    AddToSelected,
+    /// Remove the selected row's extra triggers.
+    ClearSelected,
+    /// Show the previous (-1) or next (+1) connected pad.
+    SwitchPad(isize),
+    /// Select this button's row and add a key or button to it.
+    Remap(usize),
+}
+
+/// The action for holding the input at `index` (in `ALL` order), and how long it takes.
+/// Directions move the selection, so holding them does nothing more.
+pub fn hold_action(index: usize, pads: usize) -> Option<(HoldAction, Duration)> {
+    let button = *ALL.get(index)?;
+    Some(match button {
+        XButton::B => (HoldAction::Leave, Duration::from_secs(2)),
+        XButton::A => (HoldAction::AddToSelected, Duration::from_secs(1)),
+        XButton::Y => (HoldAction::ClearSelected, Duration::from_secs(1)),
+        XButton::Lb if pads > 1 => (HoldAction::SwitchPad(-1), Duration::from_secs(1)),
+        XButton::Rb if pads > 1 => (HoldAction::SwitchPad(1), Duration::from_secs(1)),
+        XButton::DpadUp | XButton::DpadDown | XButton::DpadLeft | XButton::DpadRight => {
+            return None;
+        }
+        b if b.stick_direction().is_some() => return None,
+        _ => (HoldAction::Remap(index), Duration::from_secs(3)),
+    })
+}
+
 pub fn navigate(selected: usize, action: Action) -> usize {
     let column = COLUMNS
         .iter()
@@ -314,6 +348,47 @@ pub fn key_name(vk: u16) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn index(button: XButton) -> usize {
+        ALL.iter().position(|b| *b == button).unwrap()
+    }
+
+    #[test]
+    fn holds_leave_add_clear_or_remap() {
+        let secs = |s| Duration::from_secs(s);
+        assert_eq!(
+            hold_action(index(XButton::B), 1),
+            Some((HoldAction::Leave, secs(2)))
+        );
+        assert_eq!(
+            hold_action(index(XButton::A), 1),
+            Some((HoldAction::AddToSelected, secs(1)))
+        );
+        assert_eq!(
+            hold_action(index(XButton::Y), 1),
+            Some((HoldAction::ClearSelected, secs(1)))
+        );
+        let x = index(XButton::X);
+        assert_eq!(hold_action(x, 1), Some((HoldAction::Remap(x), secs(3))));
+        let lb = index(XButton::Lb);
+        assert_eq!(
+            hold_action(lb, 1),
+            Some((HoldAction::Remap(lb), secs(3))),
+            "one pad"
+        );
+        assert_eq!(
+            hold_action(lb, 2),
+            Some((HoldAction::SwitchPad(-1), secs(1))),
+            "two pads"
+        );
+        assert_eq!(
+            hold_action(index(XButton::DpadUp), 1),
+            None,
+            "directions navigate"
+        );
+        assert_eq!(hold_action(index(XButton::LsLeft), 1), None);
+        assert_eq!(hold_action(99, 1), None);
+    }
 
     #[test]
     fn navigation_moves_in_all_four_directions() {

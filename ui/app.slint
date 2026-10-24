@@ -626,6 +626,9 @@ export component AppWindow inherits Window {
     in property <bool> capturing;
     in property <string> capture-text;
     in property <float> back-progress;
+    // Controllers screen: how far a held button is toward its action, and what it will do.
+    in property <float> hold-progress;
+    in property <string> hold-text;
     in property <bool> gear-focused;
     in property <[AddRow]> add-rows;
     in property <int> add-index;
@@ -649,6 +652,10 @@ export component AppWindow inherits Window {
     callback controller-event();
     callback back-released();
     callback back-hold-tick();
+    // An action from a pad (keyboard actions come through `action`).
+    callback pad-action(Action);
+    // Times holds on the Controllers screen.
+    callback hold-tick();
     // Empty message: the game ended normally; otherwise why it failed.
     callback game-ended(string);
     // A worker thread (background decoding, art download) has results waiting.
@@ -1299,15 +1306,22 @@ export component AppWindow inherits Window {
             height: 46 * u;
             alignment: end;
             spacing: 32 * u;
+            Text {
+                text: "Hold any other button 3 s to remap it";
+                color: #ffffff73;
+                font-size: 18 * u;
+                vertical-alignment: center;
+            }
+
             ButtonHint {
                 key: "A";
-                label: "Add key or button";
+                label: "Hold: add key or button";
                 u: u;
             }
 
             ButtonHint {
                 key: "Y";
-                label: "Clear";
+                label: "Hold: clear";
                 u: u;
             }
 
@@ -1326,6 +1340,41 @@ export component AppWindow inherits Window {
                     color: #ffffffa6;
                     font-size: 20 * u;
                     vertical-alignment: center;
+                }
+            }
+        }
+
+        // The hold in progress: what it will do and how far along it is.
+        if hold-progress > 0: Rectangle {
+            x: (parent.width - self.width) / 2;
+            y: root.height - 150 * u;
+            width: 760 * u;
+            height: 64 * u;
+            border-radius: 18 * u;
+            background: #121a2bf2;
+            border-width: 1px;
+            border-color: #2d8cff80;
+            Text {
+                y: 10 * u;
+                width: parent.width;
+                text: hold-text;
+                font-size: 20 * u;
+                color: white;
+                horizontal-alignment: center;
+            }
+
+            Rectangle {
+                x: 24 * u;
+                y: parent.height - 18 * u;
+                width: parent.width - 48 * u;
+                height: 6 * u;
+                border-radius: 3 * u;
+                background: #ffffff1f;
+                Rectangle {
+                    x: 0;
+                    width: parent.width * hold-progress;
+                    border-radius: parent.border-radius;
+                    background: #2d8cff;
                 }
             }
         }
