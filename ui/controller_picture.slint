@@ -1,0 +1,299 @@
+// Drop-in replacement for ControllerPicture: the controller-cutout.png art with lit/held
+// overlays on top. Design space is the cutout's pixels (1504 x 1062) plus a 60 px strip
+// above it for the LT/RT chips, so 1504 x 1122 in total.
+// Inputs use controllers::ALL order: left column 0-9, D-pad 10-13, right column 14-24.
+
+component Glow inherits Rectangle {
+    in property <bool> lit;
+    in property <bool> held;
+    in property <color> accent;
+    in property <color> held-color;
+    in property <length> unit;
+    property <color> tint: held ? held-color : accent;
+    // Ring plus soft halo only, so the button art stays readable underneath.
+    opacity: lit || held ? 1 : 0;
+    background: tint.with-alpha(0.12);
+    border-width: max(2px, 5 * unit);
+    border-color: tint;
+    animate opacity { duration: 120ms; }
+
+    Rectangle {
+        x: -9 * unit;
+        y: -9 * unit;
+        width: parent.width + 18 * unit;
+        height: parent.height + 18 * unit;
+        border-radius: parent.border-radius + 9 * unit;
+        border-width: 8 * unit;
+        border-color: tint.with-alpha(0.35);
+    }
+    Rectangle {
+        x: -18 * unit;
+        y: -18 * unit;
+        width: parent.width + 36 * unit;
+        height: parent.height + 36 * unit;
+        border-radius: parent.border-radius + 18 * unit;
+        border-width: 9 * unit;
+        border-color: tint.with-alpha(0.14);
+    }
+}
+
+component RingGlow inherits Glow {
+    in property <float> cx;
+    in property <float> cy;
+    in property <float> r;
+    x: (cx - r) * self.unit;
+    y: (cy - r) * self.unit;
+    width: 2 * r * self.unit;
+    height: self.width;
+    border-radius: self.width / 2;
+}
+
+component StickGlow inherits Rectangle {
+    in property <float> cx;
+    in property <float> cy;
+    in property <length> unit;
+    in property <color> accent;
+    in property <color> held-color;
+    in property <bool> cap-lit;
+    in property <bool> cap-held;
+    // up, left, right, down — same order as controllers::ALL
+    in property <[bool]> dir-lit;
+    in property <[bool]> dir-held;
+
+    property <bool> dir-active: dir-lit[0] || dir-lit[1] || dir-lit[2] || dir-lit[3] || dir-held[0] || dir-held[1] || dir-held[2] || dir-held[3];
+    property <bool> any-held: dir-held[0] || dir-held[1] || dir-held[2] || dir-held[3];
+    // Which way the stick is being moved (held wins over the selection preview).
+    property <float> tilt-x: any-held ? (dir-held[2] ? 1 : 0) - (dir-held[1] ? 1 : 0) : (dir-lit[2] ? 1 : 0) - (dir-lit[1] ? 1 : 0);
+    property <float> tilt-y: any-held ? (dir-held[3] ? 1 : 0) - (dir-held[0] ? 1 : 0) : (dir-lit[3] ? 1 : 0) - (dir-lit[0] ? 1 : 0);
+
+    x: (cx - 160) * unit;
+    y: (cy - 160) * unit;
+    width: 320 * unit;
+    height: 320 * unit;
+
+    RingGlow {
+        cx: 160;
+        cy: 160;
+        r: 98;
+        unit: unit;
+        accent: accent;
+        held-color: held-color;
+        lit: cap-lit;
+        held: cap-held;
+    }
+
+    // Ghost of the cap pushed toward the active direction.
+    Rectangle {
+        x: (160 - 92 + tilt-x * 26) * unit;
+        y: (160 - 92 + tilt-y * 26) * unit;
+        width: 184 * unit;
+        height: self.width;
+        border-radius: self.width / 2;
+        opacity: dir-active ? 1 : 0;
+        background: (any-held ? held-color : accent).with-alpha(0.12);
+        border-width: max(2px, 4 * unit);
+        border-color: any-held ? held-color : accent;
+        animate x, y { duration: 160ms; easing: ease-out; }
+        animate opacity { duration: 120ms; }
+    }
+
+    for chevron[i] in [
+        "M 144 30 L 160 14 L 176 30",
+        "M 30 144 L 14 160 L 30 176",
+        "M 290 144 L 306 160 L 290 176",
+        "M 144 290 L 160 306 L 176 290",
+    ]: Path {
+        width: parent.width;
+        height: parent.height;
+        viewbox-width: 320;
+        viewbox-height: 320;
+        commands: chevron;
+        fill: transparent;
+        opacity: dir-active || cap-lit ? 1 : 0;
+        stroke: dir-held[i] ? held-color : dir-lit[i] ? accent : #1d2433b0;
+        stroke-width: max(2px, (dir-lit[i] || dir-held[i] ? 9 : 6) * unit);
+        stroke-line-cap: round;
+        stroke-line-join: round;
+        animate opacity { duration: 120ms; }
+    }
+}
+
+component TriggerChip inherits Rectangle {
+    in property <string> label;
+    in property <bool> lit;
+    in property <bool> held;
+    in property <color> accent;
+    in property <color> held-color;
+    in property <length> unit;
+    border-radius: 16 * unit;
+    background: held ? held-color : lit ? accent : @linear-gradient(180deg, #3a4357 0%, #232a38 100%);
+    border-width: max(1px, 2 * unit);
+    border-color: lit ? accent.brighter(0.6) : #ffffff2e;
+    drop-shadow-blur: lit || held ? 26 * unit : 8 * unit;
+    drop-shadow-color: held ? held-color : lit ? accent : #00000080;
+    drop-shadow-offset-y: lit || held ? 0 : 3 * unit;
+    animate background { duration: 90ms; }
+
+    Text {
+        width: parent.width;
+        height: parent.height;
+        text: label;
+        color: held ? #0b1424 : #ffffff;
+        font-size: parent.height * 0.5;
+        font-weight: 800;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+}
+
+export component ControllerPicture inherits Rectangle {
+    in property <int> highlight: -1;
+    in property <[bool]> live;
+    in property <color> accent: #2d8cff;
+    // White plastic hides a white "held" glow, so held inputs use a contrasting tint.
+    in property <color> held-color: #2ee6a8;
+
+    // Height / width of the art. Size the element to width * aspect for an exact fit.
+    out property <float> aspect: 1122 / 1504;
+    // Where each input sits, in controllers::ALL order, in units of width / 1000.
+    out property <[{x: float, y: float}]> anchors: [
+        { x: 246.0, y: 19.3 }, { x: 246.0, y: 63.2 }, { x: 427.5, y: 229.4 }, { x: 568.5, y: 229.4 }, { x: 498.7, y: 123.0 },
+        { x: 248.7, y: 226.7 }, { x: 248.7, y: 137.0 }, { x: 158.9, y: 226.7 }, { x: 338.4, y: 226.7 }, { x: 248.7, y: 316.5 },
+        { x: 367.7, y: 339.1 }, { x: 319.1, y: 389.0 }, { x: 417.6, y: 389.0 }, { x: 367.7, y: 438.8 },
+        { x: 751.3, y: 19.3 }, { x: 751.3, y: 63.2 }, { x: 750.7, y: 164.9 }, { x: 682.8, y: 229.4 }, { x: 817.2, y: 232.7 }, { x: 750.0, y: 292.6 },
+        { x: 627.0, y: 370.3 }, { x: 627.0, y: 280.6 }, { x: 537.2, y: 370.3 }, { x: 716.8, y: 370.3 }, { x: 627.0, y: 460.1 },
+    ];
+
+    property <length> unit: min(self.width / 1504, self.height / 1122);
+
+    Rectangle {
+        x: (parent.width - 1504 * unit) / 2;
+        y: (parent.height - 1122 * unit) / 2;
+        width: 1504 * unit;
+        height: 1122 * unit;
+
+        TriggerChip {
+            x: 305 * unit;
+            y: 6 * unit;
+            width: 130 * unit;
+            height: 46 * unit;
+            unit: unit;
+            label: "LT";
+            accent: accent;
+            held-color: held-color;
+            lit: highlight == 0;
+            held: live[0];
+        }
+        TriggerChip {
+            x: 1065 * unit;
+            y: 6 * unit;
+            width: 130 * unit;
+            height: 46 * unit;
+            unit: unit;
+            label: "RT";
+            accent: accent;
+            held-color: held-color;
+            lit: highlight == 14;
+            held: live[14];
+        }
+
+        Image {
+            y: 60 * unit;
+            width: 1504 * unit;
+            height: 1062 * unit;
+            source: @image-url("controller-cutout.png");
+        }
+
+        // Everything below is drawn in image pixels, offset by the chip strip.
+        Rectangle {
+            y: 60 * unit;
+            width: 1504 * unit;
+            height: 1062 * unit;
+
+            for bumper in [
+                { index: 1, commands: "M 255 92 C 300 50, 380 22, 480 14" },
+                { index: 15, commands: "M 1245 92 C 1200 50, 1120 22, 1020 14" },
+            ]: Rectangle {
+                property <bool> lit: highlight == bumper.index;
+                property <bool> held: live[bumper.index];
+                property <color> tint: held ? held-color : accent;
+                opacity: lit || held ? 1 : 0;
+                animate opacity { duration: 120ms; }
+
+                Path {
+                    width: parent.width;
+                    height: parent.height;
+                    viewbox-width: 1504;
+                    viewbox-height: 1062;
+                    commands: bumper.commands;
+                    fill: transparent;
+                    stroke: tint.with-alpha(0.35);
+                    stroke-width: 40 * unit;
+                    stroke-line-cap: round;
+                }
+                Path {
+                    width: parent.width;
+                    height: parent.height;
+                    viewbox-width: 1504;
+                    viewbox-height: 1062;
+                    commands: bumper.commands;
+                    fill: transparent;
+                    stroke: tint;
+                    stroke-width: 16 * unit;
+                    stroke-line-cap: round;
+                }
+            }
+
+            RingGlow { cx: 750; cy: 125; r: 62; unit: unit; accent: accent; held-color: held-color; lit: highlight == 4; held: live[4]; }
+            RingGlow { cx: 643; cy: 285; r: 35; unit: unit; accent: accent; held-color: held-color; lit: highlight == 2; held: live[2]; }
+            RingGlow { cx: 855; cy: 285; r: 35; unit: unit; accent: accent; held-color: held-color; lit: highlight == 3; held: live[3]; }
+
+            StickGlow {
+                cx: 374;
+                cy: 281;
+                unit: unit;
+                accent: accent;
+                held-color: held-color;
+                cap-lit: highlight == 5;
+                cap-held: live[5];
+                dir-lit: [highlight == 6, highlight == 7, highlight == 8, highlight == 9];
+                dir-held: [live[6], live[7], live[8], live[9]];
+            }
+
+            for arm in [
+                { index: 10, x: 518, y: 410, w: 70, h: 80 },
+                { index: 11, x: 440, y: 490, w: 80, h: 70 },
+                { index: 12, x: 588, y: 490, w: 80, h: 70 },
+                { index: 13, x: 518, y: 560, w: 70, h: 80 },
+            ]: Glow {
+                x: arm.x * unit;
+                y: arm.y * unit;
+                width: arm.w * unit;
+                height: arm.h * unit;
+                border-radius: 14 * unit;
+                unit: unit;
+                accent: accent;
+                held-color: held-color;
+                lit: highlight == arm.index;
+                held: live[arm.index];
+            }
+
+            StickGlow {
+                cx: 943;
+                cy: 497;
+                unit: unit;
+                accent: accent;
+                held-color: held-color;
+                cap-lit: highlight == 20;
+                cap-held: live[20];
+                dir-lit: [highlight == 21, highlight == 22, highlight == 23, highlight == 24];
+                dir-held: [live[21], live[22], live[23], live[24]];
+            }
+
+            RingGlow { cx: 1129; cy: 188; r: 52; unit: unit; accent: accent; held-color: held-color; lit: highlight == 16; held: live[16]; }
+            RingGlow { cx: 1027; cy: 285; r: 52; unit: unit; accent: accent; held-color: held-color; lit: highlight == 17; held: live[17]; }
+            RingGlow { cx: 1229; cy: 290; r: 52; unit: unit; accent: accent; held-color: held-color; lit: highlight == 18; held: live[18]; }
+            RingGlow { cx: 1128; cy: 380; r: 52; unit: unit; accent: accent; held-color: held-color; lit: highlight == 19; held: live[19]; }
+        }
+    }
+}
