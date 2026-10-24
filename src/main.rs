@@ -42,7 +42,9 @@ const TOAST_DURATION: Duration = Duration::from_millis(2600);
 const INPUT_GRACE: Duration = Duration::from_millis(1000);
 /// Full-screen art loads only once the selection rests, so scrolling never stutters on decoding.
 const HERO_DELAY: Duration = Duration::from_millis(140);
-const HERO_CACHE: usize = 6;
+/// Current and previous background: stepping back is instant, and each extra one would cost
+/// 5-8 MB for the whole session. Others decode again (a few ms) behind HERO_DELAY.
+const HERO_CACHE: usize = 2;
 
 struct App {
     home: Home,
