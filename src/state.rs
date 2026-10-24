@@ -117,13 +117,13 @@ impl State {
         fs::rename(&temp, path).map_err(|e| format!("Could not save {}: {e}", path.display()))
     }
 
-    /// Forgets lookups that found nothing with an older, weaker lookup, so they are tried again.
-    /// True when something changed (worth saving).
+    /// Forgets the lookups made by an older, weaker lookup, so games still missing art are
+    /// looked up again (games with complete art aren't). True when something changed.
     pub fn retry_art_misses(&mut self, version: u32) -> bool {
         if self.art_lookup_version >= version {
             return false;
         }
-        self.art_lookups.retain(|_, app| app.is_some());
+        self.art_lookups.clear();
         self.art_lookup_version = version;
         true
     }

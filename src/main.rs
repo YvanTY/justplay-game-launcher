@@ -152,9 +152,10 @@ fn main() -> Result<(), slint::PlatformError> {
     let state_path = data_dir.join("state.json");
     let (mut state, state_problem) = State::load(&state_path);
     // 2: Steam editions and subtitles, then PCGamingWiki for games Steam no longer sells.
+    // 3: the Microsoft Store and SteamGridDB, and plain-word searches.
     // Saved at once only if state.json was read fine: a file that was locked or unreadable
     // must not be replaced by an empty state before the user has done anything.
-    if state.retry_art_misses(2)
+    if state.retry_art_misses(3)
         && state_problem.is_none()
         && let Err(e) = state.save(&state_path)
     {
