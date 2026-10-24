@@ -1,11 +1,15 @@
-//! The Add games screen: games found on the drives, one row each. UI-free so it can be
-//! unit-tested; main.rs runs the scan, performs the effects and mirrors this into the window.
+//! The Add games screen: games found on the drives, one row each, plus choosing where to look
+//! (every drive, one drive, or a folder picked with a controller-friendly browser). UI-free so
+//! it can be unit-tested; main.rs runs the scan, performs the effects and mirrors this into the
+//! window.
 
 use std::collections::BTreeSet;
-use std::path::PathBuf;
+use std::fs;
+use std::path::{Path, PathBuf};
 
 use crate::Action;
 use crate::library::discover::Candidate;
+use crate::library::drives;
 
 /// Rows skipped by LT / RT.
 const PAGE: usize = 6;
@@ -31,29 +35,111 @@ impl Row {
     }
 }
 
+/// Where a scan looks.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Place {
+    AllDrives,
+    /// A drive root (`E:\`) or any folder.
+    Folder(PathBuf),
+}
+
+impl Place {
+    pub fn describe(&self) -> String {
+        match self {
+            Place::AllDrives => "all drives".into(),
+            Place::Folder(path) => path.display().to_string(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Mode {
+    Results,
+    /// Choosing where to look: all drives, a drive, a recent folder, or "Choose a folder…".
+    Places,
+    /// Inside the folder browser; None is the list of drives.
+    Browse(Option<PathBuf>),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum PlaceKind {
+    AllDrives,
+    Drive,
+    Folder,
+    /// Opens the folder browser.
+    Browse,
+    /// In the browser: look in the folder being shown.
+    LookHere,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PlaceRow {
+    pub kind: PlaceKind,
+    pub path: Option<PathBuf>,
+    pub title: String,
+    pub detail: String,
+}
+
 #[derive(Debug, PartialEq, Eq)]
 pub enum Effect {
     Add(usize),
     Ignore(usize),
     Restore(usize),
+    /// Scan again where the last scan looked.
     Rescan,
+    /// Open the list of places (main supplies the remembered folders).
+    ChoosePlace,
+    /// Scan this place (and remember it).
+    Scan(Place),
+    /// List this folder's subfolders off the UI thread (a sleeping external drive can take
+    /// seconds to answer), then call `set_listing`.
+    List(PathBuf),
+    /// B on the results: leave the screen.
+    Close,
 }
 
-#[derive(Default)]
 pub struct AddGames {
     pub scanning: bool,
     /// Folders looked at so far in the running scan.
     pub folders: usize,
     pub rows: Vec<Row>,
     pub focus: usize,
+    pub mode: Mode,
+    pub place: Place,
+    /// Rows of the place list or the folder browser.
+    pub places: Vec<PlaceRow>,
+    pub place_focus: usize,
+    /// Folders chosen before, shown again in the place list.
+    recent: Vec<PathBuf>,
+    /// The browser waits for a folder listing.
+    pub listing: bool,
+}
+
+impl Default for AddGames {
+    fn default() -> AddGames {
+        AddGames {
+            scanning: false,
+            folders: 0,
+            rows: Vec::new(),
+            focus: 0,
+            mode: Mode::Results,
+            place: Place::AllDrives,
+            places: Vec::new(),
+            place_focus: 0,
+            recent: Vec::new(),
+            listing: false,
+        }
+    }
 }
 
 impl AddGames {
-    pub fn start_scan(&mut self) {
+    pub fn start_scan(&mut self, place: Place) {
         self.scanning = true;
         self.folders = 0;
         self.rows.clear();
         self.focus = 0;
+        self.mode = Mode::Results;
+        self.place = place;
     }
 
     /// New games first (alphabetical, as found), ignored ones after them.
@@ -87,7 +173,94 @@ impl AddGames {
             .count()
     }
 
+    /// The list of places: every drive, the folders used before (`recent`), and the browser.
+    pub fn open_places(&mut self, recent: &[PathBuf]) {
+        self.recent = recent.to_vec();
+        let drives = drives::scannable();
+        let mut rows = vec![PlaceRow {
+            kind: PlaceKind::AllDrives,
+            path: None,
+            title: "All drives".into(),
+            detail: drives
+                .iter()
+                .map(|l| format!("{l}:"))
+                .collect::<Vec<_>>()
+                .join("  "),
+        }];
+        rows.extend(drives.iter().map(|&letter| drive_row(letter)));
+        rows.extend(recent.iter().filter(|p| p.is_dir()).map(|path| PlaceRow {
+            kind: PlaceKind::Folder,
+            path: Some(path.clone()),
+            title: folder_name(path),
+            detail: path.display().to_string(),
+        }));
+        rows.push(PlaceRow {
+            kind: PlaceKind::Browse,
+            path: None,
+            title: "Choose a folder…".into(),
+            detail: "Browse your drives with the controller".into(),
+        });
+        // Start on the place the last scan used.
+        self.place_focus = rows
+            .iter()
+            .position(|row| match (&self.place, &row.path) {
+                (Place::AllDrives, None) => row.kind == PlaceKind::AllDrives,
+                (Place::Folder(place), Some(path)) => place == path,
+                _ => false,
+            })
+            .unwrap_or(0);
+        self.places = rows;
+        self.mode = Mode::Places;
+    }
+
+    /// Shows the drives (None), or starts showing `dir`: "Look in this folder" at once, its
+    /// subfolders when the listing arrives (`Effect::List`).
+    pub fn browse(&mut self, dir: Option<PathBuf>) -> Option<Effect> {
+        self.place_focus = 0;
+        self.mode = Mode::Browse(dir.clone());
+        match dir {
+            None => {
+                self.listing = false;
+                self.places = drives::scannable().into_iter().map(drive_row).collect();
+                None
+            }
+            Some(dir) => {
+                self.listing = true;
+                self.places = vec![PlaceRow {
+                    kind: PlaceKind::LookHere,
+                    path: Some(dir.clone()),
+                    title: "Look in this folder".into(),
+                    detail: dir.display().to_string(),
+                }];
+                Some(Effect::List(dir))
+            }
+        }
+    }
+
+    /// The subfolders of `dir` arrived; ignored if the browser moved on meanwhile.
+    pub fn set_listing(&mut self, dir: &Path, folders: Vec<PathBuf>) {
+        if self.mode != Mode::Browse(Some(dir.to_path_buf())) {
+            return;
+        }
+        self.listing = false;
+        self.places.truncate(1);
+        self.places.extend(folders.into_iter().map(|path| PlaceRow {
+            kind: PlaceKind::Folder,
+            detail: path.display().to_string(),
+            title: folder_name(&path),
+            path: Some(path),
+        }));
+    }
+
     pub fn handle(&mut self, action: Action) -> Option<Effect> {
+        match self.mode.clone() {
+            Mode::Results => self.handle_results(action),
+            Mode::Places => self.handle_places(action),
+            Mode::Browse(dir) => self.handle_browse(action, dir),
+        }
+    }
+
+    fn handle_results(&mut self, action: Action) -> Option<Effect> {
         let last = self.rows.len().saturating_sub(1);
         match action {
             Action::Up => self.focus = self.focus.saturating_sub(1),
@@ -118,10 +291,114 @@ impl AddGames {
                 };
             }
             Action::TabNext if !self.scanning => return Some(Effect::Rescan),
+            Action::TabPrev => return Some(Effect::ChoosePlace),
+            Action::Back => return Some(Effect::Close),
             _ => {}
         }
         None
     }
+
+    fn handle_places(&mut self, action: Action) -> Option<Effect> {
+        match action {
+            Action::Back => self.mode = Mode::Results,
+            Action::Confirm => {
+                let row = self.places.get(self.place_focus)?.clone();
+                return match row.kind {
+                    PlaceKind::AllDrives => Some(Effect::Scan(Place::AllDrives)),
+                    PlaceKind::Browse => self.browse(None),
+                    _ => row.path.map(|p| Effect::Scan(Place::Folder(p))),
+                };
+            }
+            _ => self.move_place_focus(action),
+        }
+        None
+    }
+
+    fn handle_browse(&mut self, action: Action, dir: Option<PathBuf>) -> Option<Effect> {
+        match action {
+            Action::Back => match dir.as_deref().and_then(Path::parent) {
+                Some(parent) => return self.browse(Some(parent.to_path_buf())),
+                // From a drive root (or the drive list) back to the places.
+                None if dir.is_some() => return self.browse(None),
+                None => {
+                    let recent = std::mem::take(&mut self.recent);
+                    self.open_places(&recent);
+                }
+            },
+            Action::Options => return dir.map(|d| Effect::Scan(Place::Folder(d))),
+            Action::Confirm => {
+                let row = self.places.get(self.place_focus)?.clone();
+                match (row.kind, row.path) {
+                    (PlaceKind::LookHere, Some(path)) => {
+                        return Some(Effect::Scan(Place::Folder(path)));
+                    }
+                    (_, Some(path)) => return self.browse(Some(path)),
+                    _ => {}
+                }
+            }
+            _ => self.move_place_focus(action),
+        }
+        None
+    }
+
+    fn move_place_focus(&mut self, action: Action) {
+        let last = self.places.len().saturating_sub(1);
+        match action {
+            Action::Up => self.place_focus = self.place_focus.saturating_sub(1),
+            Action::Down => self.place_focus = (self.place_focus + 1).min(last),
+            Action::PagePrev => self.place_focus = self.place_focus.saturating_sub(PAGE),
+            Action::PageNext => self.place_focus = (self.place_focus + PAGE).min(last),
+            _ => {}
+        }
+    }
+}
+
+/// A folder's subfolders, sorted by name, hidden and system ones left out. May block for
+/// seconds on a sleeping drive: call it off the UI thread.
+pub fn list_folders(dir: &Path) -> Vec<PathBuf> {
+    let mut folders: Vec<PathBuf> = fs::read_dir(dir)
+        .map(|entries| {
+            entries
+                .flatten()
+                .filter(|e| e.file_type().is_ok_and(|t| t.is_dir()))
+                .map(|e| e.path())
+                .filter(|p| !hidden(p))
+                .collect()
+        })
+        .unwrap_or_default();
+    folders.sort_by_cached_key(|p| folder_name(p).to_lowercase());
+    folders
+}
+
+fn drive_row(letter: char) -> PlaceRow {
+    let root = PathBuf::from(format!("{letter}:\\"));
+    PlaceRow {
+        kind: PlaceKind::Drive,
+        title: match drives::label(letter) {
+            Some(label) => format!("{letter}:  {label}"),
+            None => format!("{letter}:"),
+        },
+        detail: "Drive".into(),
+        path: Some(root),
+    }
+}
+
+fn folder_name(path: &Path) -> String {
+    path.file_name().map_or_else(
+        || path.display().to_string(),
+        |n| n.to_string_lossy().into_owned(),
+    )
+}
+
+/// System and hidden folders ($Recycle.Bin, System Volume Information, .git, the protective
+/// autorun.inf folders some tools create) aren't offered.
+fn hidden(path: &Path) -> bool {
+    use std::os::windows::fs::MetadataExt;
+    const HIDDEN: u32 = 0x2;
+    const SYSTEM: u32 = 0x4;
+    let name = folder_name(path).to_lowercase();
+    let flagged = fs::metadata(path).is_ok_and(|m| m.file_attributes() & (HIDDEN | SYSTEM) != 0);
+    flagged || name.starts_with('$') || name.starts_with('.')
 }
 
 #[cfg(test)]
@@ -138,7 +415,7 @@ mod tests {
 
     fn screen() -> AddGames {
         let mut screen = AddGames::default();
-        screen.start_scan();
+        screen.start_scan(Place::AllDrives);
         let ignored = BTreeSet::from([PathBuf::from(r"E:\Games\Bully")]);
         screen.set_results(
             vec![
@@ -191,12 +468,96 @@ mod tests {
         assert_eq!(screen.handle(Action::Confirm), None);
         assert_eq!(screen.handle(Action::Options), Some(Effect::Restore(2)));
         assert_eq!(screen.handle(Action::TabNext), Some(Effect::Rescan));
-        screen.start_scan();
+        screen.start_scan(Place::AllDrives);
         assert_eq!(screen.handle(Action::TabNext), None, "already scanning");
         assert_eq!(
             screen.handle(Action::Confirm),
             None,
             "no rows while scanning"
         );
+        assert_eq!(screen.handle(Action::Back), Some(Effect::Close));
+    }
+
+    #[test]
+    fn places_list_drives_recent_folders_and_the_browser() {
+        let mut screen = screen();
+        assert_eq!(screen.handle(Action::TabPrev), Some(Effect::ChoosePlace));
+        let recent = std::env::temp_dir();
+        screen.open_places(std::slice::from_ref(&recent));
+        assert_eq!(screen.mode, Mode::Places);
+        assert_eq!(screen.places[0].kind, PlaceKind::AllDrives);
+        assert_eq!(screen.place_focus, 0, "starts on the place last used");
+        assert!(screen.places.iter().any(|r| r.kind == PlaceKind::Drive));
+        assert!(
+            screen
+                .places
+                .iter()
+                .any(|r| r.path.as_ref() == Some(&recent))
+        );
+        assert_eq!(screen.places.last().unwrap().kind, PlaceKind::Browse);
+        assert_eq!(
+            screen.handle(Action::Confirm),
+            Some(Effect::Scan(Place::AllDrives))
+        );
+        screen.handle(Action::Back);
+        assert_eq!(screen.mode, Mode::Results);
+    }
+
+    #[test]
+    fn the_browser_opens_folders_looks_in_them_and_goes_up() {
+        let root = std::env::temp_dir().join(format!("gl-browse-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(root.join("Jeu").join("Blur")).unwrap();
+        fs::create_dir_all(root.join("$Recycle.Bin")).unwrap();
+        let mut screen = screen();
+        assert_eq!(
+            screen.browse(Some(root.clone())),
+            Some(Effect::List(root.clone()))
+        );
+        assert!(screen.listing);
+        screen.set_listing(&root, list_folders(&root));
+        assert!(!screen.listing);
+        let titles: Vec<&str> = screen.places.iter().map(|r| r.title.as_str()).collect();
+        assert_eq!(
+            titles,
+            ["Look in this folder", "Jeu"],
+            "system folders hidden"
+        );
+        screen.handle(Action::Down);
+        assert_eq!(
+            screen.handle(Action::Confirm),
+            Some(Effect::List(root.join("Jeu")))
+        );
+        assert_eq!(screen.mode, Mode::Browse(Some(root.join("Jeu"))));
+        // A listing that arrives after moving on is dropped.
+        screen.set_listing(&root, list_folders(&root));
+        assert_eq!(screen.places.len(), 1);
+        assert_eq!(
+            screen.handle(Action::Options),
+            Some(Effect::Scan(Place::Folder(root.join("Jeu")))),
+            "Y looks here"
+        );
+        assert_eq!(
+            screen.handle(Action::Confirm),
+            Some(Effect::Scan(Place::Folder(root.join("Jeu")))),
+            "so does the first row"
+        );
+        screen.handle(Action::Back);
+        assert_eq!(screen.mode, Mode::Browse(Some(root.clone())));
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn leaving_the_browser_shows_the_whole_place_list_again() {
+        let mut screen = screen();
+        screen.open_places(&[]);
+        let full = screen.places.len();
+        screen.place_focus = full - 1; // Choose a folder…
+        screen.handle(Action::Confirm);
+        assert_eq!(screen.mode, Mode::Browse(None));
+        screen.handle(Action::Back);
+        assert_eq!(screen.mode, Mode::Places);
+        assert_eq!(screen.places.len(), full);
+        assert_eq!(screen.places[0].kind, PlaceKind::AllDrives);
     }
 }

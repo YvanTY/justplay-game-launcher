@@ -28,6 +28,11 @@ pub enum Event {
         id: String,
         outcome: ArtOutcome,
     },
+    /// The folder browser's listing of `dir`.
+    Listing {
+        dir: PathBuf,
+        folders: Vec<PathBuf>,
+    },
     /// The drive scan has looked at this many folders so far.
     ScanProgress {
         folders: usize,
@@ -192,6 +197,19 @@ fn fetch_art(job: &ArtJob, mut on_image: impl FnMut()) -> Result<ArtOutcome, net
     } else {
         ArtOutcome::NoMatch
     })
+}
+
+/// Lists a folder for the Add games browser without freezing the UI on a sleeping drive.
+pub fn spawn_listing(notifier: Notifier, dir: PathBuf) {
+    let spawned = std::thread::Builder::new()
+        .name("folder-listing".into())
+        .spawn(move || {
+            let folders = crate::add_games::list_folders(&dir);
+            notifier.send(Event::Listing { dir, folders });
+        });
+    if let Err(e) = spawned {
+        crate::diag::log(&format!("folder listing could not start: {e}"));
+    }
 }
 
 /// Looks for games on `roots` for the Add games screen. Setting `cancel` stops it; a cancelled

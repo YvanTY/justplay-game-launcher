@@ -544,6 +544,10 @@ fn drain_background(ui: &AppWindow, app: &mut App) {
             background::Event::Hero { path, pixels } => hero_loaded(ui, app, path, pixels),
             background::Event::ArtFile { id } => refresh_art(ui, app, &id),
             background::Event::Art { id, outcome } => art_fetched(ui, app, id, outcome),
+            background::Event::Listing { dir, folders } => {
+                app.add_games.set_listing(&dir, folders);
+                sync_add_games_screen(ui, app);
+            }
             background::Event::ScanProgress { folders } if app.add_games.scanning => {
                 app.add_games.folders = folders;
                 sync_add_games_screen(ui, app);
@@ -1072,7 +1076,7 @@ fn handle_menu_action(ui: &AppWindow, app: &mut App, action: Action) {
         handle_controllers_action(ui, app, action);
         return;
     }
-    if app.menus.overlay == Overlay::AddGames && action != Action::Menu && action != Action::Back {
+    if app.menus.overlay == Overlay::AddGames && action != Action::Menu {
         handle_add_games_action(ui, app, action);
         return;
     }
@@ -1101,7 +1105,14 @@ fn handle_menu_action(ui: &AppWindow, app: &mut App, action: Action) {
     for effect in effects {
         match effect {
             MenuEffect::Rescan => rescan(ui, app),
-            MenuEffect::FindGames => start_find_games(app),
+            MenuEffect::FindGames => {
+                // Where the last scan looked, if that folder is still there.
+                let place = match &app.home.state.scan_place {
+                    Some(folder) if folder.is_dir() => add_games::Place::Folder(folder.clone()),
+                    _ => add_games::Place::AllDrives,
+                };
+                start_find_games(app, place);
+            }
             MenuEffect::Exit => {
                 let _ = slint::quit_event_loop();
             }
@@ -1130,13 +1141,20 @@ fn handle_menu_action(ui: &AppWindow, app: &mut App, action: Action) {
     sync_add_games_screen(ui, app);
 }
 
-/// Starts looking for games on every fixed and removable drive (the Add games screen).
-fn start_find_games(app: &mut App) {
+/// Starts looking for games in `place`: every fixed and removable drive, or one drive or folder.
+fn start_find_games(app: &mut App, place: add_games::Place) {
     // A previous scan still running is no longer wanted.
     app.scan_cancel.store(true, Ordering::Relaxed);
     let cancel = Arc::new(AtomicBool::new(false));
     app.scan_cancel = cancel.clone();
-    app.add_games.start_scan();
+    let roots = match &place {
+        add_games::Place::AllDrives => library::drives::scannable()
+            .into_iter()
+            .map(|letter| PathBuf::from(format!("{letter}:\\")))
+            .collect(),
+        add_games::Place::Folder(folder) => vec![folder.clone()],
+    };
+    app.add_games.start_scan(place);
     let mut exes = Vec::new();
     let mut skip = vec![config::data_dir()];
     for game in &app.home.games {
@@ -1149,26 +1167,46 @@ fn start_find_games(app: &mut App) {
             skip.push(dir.to_path_buf());
         }
     }
-    let roots = library::drives::scannable()
-        .into_iter()
-        .map(|letter| PathBuf::from(format!("{letter}:\\")))
-        .collect();
     let known = library::discover::Known::new(&exes, &skip);
     background::spawn_scan(app.notifier.clone(), roots, known, cancel);
 }
 
-/// The Add games screen: A adds, Left/Right picks another exe, Y ignores or restores, RB scans
-/// again (B goes back through the menu logic).
+/// Remembers where the user chose to look: next time the screen starts there, and a folder
+/// becomes a one-press place.
+fn remember_place(ui: &AppWindow, app: &mut App, place: &add_games::Place) {
+    let state = &mut app.home.state;
+    match place {
+        add_games::Place::AllDrives => state.scan_place = None,
+        add_games::Place::Folder(folder) => {
+            state.scan_place = Some(folder.clone());
+            // Drive roots are always listed; only deeper folders are worth remembering.
+            if folder.parent().is_some() {
+                state.scan_folders.retain(|f| f != folder);
+                state.scan_folders.insert(0, folder.clone());
+                state.scan_folders.truncate(5);
+            }
+        }
+    }
+    if let Err(e) = state.save(&app.state_path) {
+        app.toasts.show(ui, e);
+    }
+}
+
+/// The Add games screen: A adds, Left/Right picks another exe, Y ignores or restores, LB
+/// chooses where to look, RB looks again, B goes back (out of the place list or the browser
+/// first).
 fn handle_add_games_action(ui: &AppWindow, app: &mut App, action: Action) {
-    let before = (
-        app.add_games.focus,
-        app.add_games.rows.get(app.add_games.focus).map(|r| r.exe),
-    );
+    let snapshot = |screen: &add_games::AddGames| {
+        (
+            screen.mode.clone(),
+            screen.focus,
+            screen.place_focus,
+            screen.rows.get(screen.focus).map(|r| r.exe),
+        )
+    };
+    let before = snapshot(&app.add_games);
     let effect = app.add_games.handle(action);
-    let after = (
-        app.add_games.focus,
-        app.add_games.rows.get(app.add_games.focus).map(|r| r.exe),
-    );
+    let after = snapshot(&app.add_games);
     let sound = match &effect {
         Some(add_games::Effect::Add(index)) => {
             add_found_game(ui, app, *index);
@@ -1183,9 +1221,34 @@ fn handle_add_games_action(ui: &AppWindow, app: &mut App, action: Action) {
             Some(Sound::Confirm)
         }
         Some(add_games::Effect::Rescan) => {
-            start_find_games(app);
+            let place = app.add_games.place.clone();
+            start_find_games(app, place);
             Some(Sound::Confirm)
         }
+        Some(add_games::Effect::ChoosePlace) => {
+            let recent = app.home.state.scan_folders.clone();
+            app.add_games.open_places(&recent);
+            Some(Sound::Confirm)
+        }
+        Some(add_games::Effect::Scan(place)) => {
+            remember_place(ui, app, place);
+            start_find_games(app, place.clone());
+            Some(Sound::Confirm)
+        }
+        Some(add_games::Effect::List(dir)) => {
+            background::spawn_listing(app.notifier.clone(), dir.clone());
+            Some(Sound::Confirm)
+        }
+        Some(add_games::Effect::Close) => {
+            app.menus.overlay = Overlay::Panel;
+            push_menus(ui, app);
+            Some(Sound::Back)
+        }
+        None if before.0 != after.0 => Some(if action == Action::Back {
+            Sound::Back
+        } else {
+            Sound::Confirm
+        }),
         None if before != after => Some(Sound::Move),
         None => matches!(
             action,
@@ -1271,46 +1334,121 @@ fn sync_add_games_screen(ui: &AppWindow, app: &mut App) {
         return;
     }
     let screen = &app.add_games;
-    let rows: Vec<AddRow> = screen
-        .rows
-        .iter()
-        .map(|row| AddRow {
-            title: row.candidate.title.as_str().into(),
-            detail: row.exe_path().display().to_string().into(),
-            status: match row.status {
-                add_games::Status::New => 0,
-                add_games::Status::Added => 1,
-                add_games::Status::Ignored => 2,
+    let (mode, title, rows, index, status) = match &screen.mode {
+        add_games::Mode::Results => (
+            0,
+            "Add games".to_string(),
+            game_rows(screen),
+            screen.focus,
+            results_status(screen),
+        ),
+        add_games::Mode::Places => (
+            1,
+            "Where to look".to_string(),
+            place_rows(screen, "Look here"),
+            screen.place_focus,
+            "Every drive, one drive, or a folder you choose".to_string(),
+        ),
+        add_games::Mode::Browse(dir) => (
+            2,
+            "Choose a folder".to_string(),
+            place_rows(screen, "Open"),
+            screen.place_focus,
+            match dir {
+                None => "Pick a drive".to_string(),
+                Some(dir) if screen.listing => format!(
+                    "Opening {}… (a sleeping drive can take a few seconds)",
+                    dir.display()
+                ),
+                Some(dir) => dir.display().to_string(),
             },
-            choice: if row.candidate.exes.len() > 1 {
-                format!("exe {} of {}", row.exe + 1, row.candidate.exes.len()).into()
-            } else {
-                SharedString::new()
-            },
-        })
-        .collect();
-    let status = if screen.scanning {
-        format!(
-            "Looking for games on your drives… {} folders checked",
-            screen.folders
-        )
-    } else if screen.rows.is_empty() {
-        "No new games found. Games already in your library aren't listed.".to_string()
-    } else {
-        let (new, added) = (screen.new_count(), screen.added_count());
-        let found = new + added;
-        let games = if found == 1 { "game" } else { "games" };
-        match (new, added) {
-            (0, 0) => "Only ignored games found (Y restores one)".to_string(),
-            (0, _) => format!("All {found} added · find them in your PC tab"),
-            (_, 0) => format!("{found} new {games} found"),
-            _ => format!("{found} new {games} found · {added} added"),
-        }
+        ),
     };
+    ui.set_add_mode(mode);
+    ui.set_add_title(title.into());
     ui.set_add_rows(ModelRc::new(VecModel::from(rows)));
-    ui.set_add_index(screen.focus as i32);
+    ui.set_add_index(index as i32);
     ui.set_add_scanning(screen.scanning);
     ui.set_add_status(status.into());
+    ui.set_add_place(format!("Looking in {}", screen.place.describe()).into());
+}
+
+fn game_rows(screen: &add_games::AddGames) -> Vec<AddRow> {
+    screen
+        .rows
+        .iter()
+        .enumerate()
+        .map(|(i, row)| {
+            let selected = i == screen.focus;
+            let (icon, tone, action, note) = match row.status {
+                // Segoe MDL2: game pad, check mark, crossed-out eye.
+                add_games::Status::New => ("\u{E7FC}", 0, "Add to library", ""),
+                add_games::Status::Added => ("\u{E8FB}", 1, "", "Added"),
+                add_games::Status::Ignored if selected => {
+                    ("\u{ED1A}", 2, "", "Ignored · Y to restore")
+                }
+                add_games::Status::Ignored => ("\u{ED1A}", 2, "", "Ignored"),
+            };
+            AddRow {
+                title: row.candidate.title.as_str().into(),
+                detail: row.exe_path().display().to_string().into(),
+                icon: icon.into(),
+                tone,
+                action: action.into(),
+                note: note.into(),
+                choice: if row.candidate.exes.len() > 1 && row.status == add_games::Status::New {
+                    format!("exe {} of {}", row.exe + 1, row.candidate.exes.len()).into()
+                } else {
+                    SharedString::new()
+                },
+            }
+        })
+        .collect()
+}
+
+/// `open` labels rows that go deeper (a drive or folder in the browser).
+fn place_rows(screen: &add_games::AddGames, open: &str) -> Vec<AddRow> {
+    screen
+        .places
+        .iter()
+        .map(|row| {
+            let (icon, action) = match row.kind {
+                // Segoe MDL2: magnifier, drive, folder.
+                add_games::PlaceKind::AllDrives => ("\u{E721}", "Look here"),
+                add_games::PlaceKind::LookHere => ("\u{E721}", "Look here"),
+                add_games::PlaceKind::Drive => ("\u{EDA2}", open),
+                add_games::PlaceKind::Folder => ("\u{E8B7}", open),
+                add_games::PlaceKind::Browse => ("\u{E8B7}", "Browse"),
+            };
+            AddRow {
+                title: row.title.as_str().into(),
+                detail: row.detail.as_str().into(),
+                icon: icon.into(),
+                tone: 0,
+                action: action.into(),
+                note: SharedString::new(),
+                choice: SharedString::new(),
+            }
+        })
+        .collect()
+}
+
+fn results_status(screen: &add_games::AddGames) -> String {
+    if screen.scanning {
+        return format!("Looking for games… {} folders checked", screen.folders);
+    }
+    if screen.rows.is_empty() {
+        return "No new games found here. Games already in your library aren't listed.".into();
+    }
+    let (new, added) = (screen.new_count(), screen.added_count());
+    let found = new + added;
+    let games = if found == 1 { "game" } else { "games" };
+    match (new, added) {
+        (0, 0) => "Only ignored games found (Y restores one)".to_string(),
+        (0, _) => format!("All {found} added · find them in your PC tab"),
+        (_, 0) => format!("{found} new {games} found"),
+        _ => format!("{found} new {games} found · {added} added"),
+    }
 }
 
 /// The Controllers screen: move through the button lists, A to add a key/button, Y to clear.

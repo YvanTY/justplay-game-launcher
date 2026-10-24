@@ -21,6 +21,10 @@ pub struct State {
     pub added_games: Vec<crate::config::PcGame>,
     /// Folders the Add games screen should no longer suggest.
     pub ignored_folders: BTreeSet<PathBuf>,
+    /// Where the Add games screen last looked (None: every drive).
+    pub scan_place: Option<PathBuf>,
+    /// Folders chosen to look in, most recent first, offered again as one-press places.
+    pub scan_folders: Vec<PathBuf>,
     /// Game id -> Steam app id its art came from (None: no Steam app). Looked up once.
     pub art_lookups: HashMap<String, Option<u32>>,
     /// Version of the art lookup that filled `art_lookups`; a newer lookup retries the misses.

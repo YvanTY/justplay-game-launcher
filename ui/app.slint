@@ -157,10 +157,16 @@ component HoldBadge inherits Rectangle {
 
 export struct AddRow {
     title: string,
-    // The exe that will be launched.
+    // The exe that will be launched, or the path of a drive or folder.
     detail: string,
-    // 0 new, 1 added, 2 ignored
-    status: int,
+    // Segoe MDL2 glyph in the round badge.
+    icon: string,
+    // 0 normal, 1 done (green), 2 dimmed (ignored)
+    tone: int,
+    // What A does, written on the selected row ("Add to library", "Open"); empty for none.
+    action: string,
+    // Text at the right end ("Added", "Ignored").
+    note: string,
     // "exe 1 of 3" when Left/Right can pick another exe; empty otherwise.
     choice: string,
 }
@@ -173,7 +179,7 @@ component AddRowView inherits Rectangle {
     background: selected ? @linear-gradient(90deg, #2d8cff40 0%, #2d8cff14 100%) : #ffffff07;
     border-width: 1px;
     border-color: selected ? #2d8cffb0 : #ffffff0f;
-    opacity: data.status == 2 && !selected ? 0.55 : 1;
+    opacity: data.tone == 2 && !selected ? 0.55 : 1;
     animate background { duration: 90ms; }
     Rectangle {
         x: 0;
@@ -194,12 +200,11 @@ component AddRowView inherits Rectangle {
                 width: 48 * u;
                 height: 48 * u;
                 border-radius: 24 * u;
-                background: data.status == 1 ? #2ecc71 : selected ? #2d8cff : #ffffff14;
+                background: data.tone == 1 ? #2ecc71 : selected ? #2d8cff : #ffffff14;
                 Text {
                     width: parent.width;
                     height: parent.height;
-                    // Segoe MDL2: check mark, hidden eye, game pad.
-                    text: data.status == 1 ? "\u{E8FB}" : data.status == 2 ? "\u{ED1A}" : "\u{E7FC}";
+                    text: data.icon;
                     font-family: "Segoe MDL2 Assets";
                     font-size: 22 * u;
                     color: white;
@@ -230,7 +235,7 @@ component AddRowView inherits Rectangle {
             }
         }
 
-        if selected && data.status == 0 && data.choice != "": HorizontalLayout {
+        if selected && data.choice != "": HorizontalLayout {
             spacing: 10 * u;
             alignment: center;
             Text {
@@ -258,10 +263,10 @@ component AddRowView inherits Rectangle {
         }
 
         // The action is written on the row itself, so A always says what it will do.
-        if selected && data.status == 0: VerticalLayout {
+        if selected && data.action != "": VerticalLayout {
             alignment: center;
             Rectangle {
-                width: add-label.preferred-width + 76 * u;
+                width: action-label.preferred-width + 76 * u;
                 height: 48 * u;
                 border-radius: 24 * u;
                 background: white;
@@ -290,8 +295,8 @@ component AddRowView inherits Rectangle {
                         }
                     }
 
-                    add-label := Text {
-                        text: "Add to library";
+                    action-label := Text {
+                        text: data.action;
                         font-size: 20 * u;
                         font-weight: 600;
                         color: #101521;
@@ -301,18 +306,11 @@ component AddRowView inherits Rectangle {
             }
         }
 
-        if data.status == 1: Text {
-            text: "Added";
-            font-size: 20 * u;
-            font-weight: 600;
-            color: #2ecc71;
-            vertical-alignment: center;
-        }
-
-        if data.status == 2: Text {
-            text: selected ? "Ignored · Y to restore" : "Ignored";
-            font-size: 18 * u;
-            color: #ffffffa6;
+        if data.note != "": Text {
+            text: data.note;
+            font-size: data.tone == 1 ? 20 * u : 18 * u;
+            font-weight: data.tone == 1 ? 600 : 400;
+            color: data.tone == 1 ? #2ecc71 : #ffffffa6;
             vertical-alignment: center;
         }
     }
@@ -502,6 +500,10 @@ export component AppWindow inherits Window {
     in property <int> add-index;
     in property <bool> add-scanning;
     in property <string> add-status;
+    // 0 results, 1 where to look, 2 folder browser
+    in property <int> add-mode;
+    in property <string> add-title: "Add games";
+    in property <string> add-place;
     in property <string> toast;
     in property <bool> toast-visible;
 
@@ -1155,6 +1157,7 @@ export component AppWindow inherits Window {
     if overlay == 5: Rectangle {
         property <length> row-h: 84 * u;
         property <length> row-pitch: 94 * u;
+        property <length> list-y: 196 * u;
         property <int> visible-rows: 8;
         // Keeps the selected row in view, a little above the bottom edge.
         property <int> scroll: Math.max(0, Math.min(add-index - 5, add-rows.length - visible-rows));
@@ -1163,7 +1166,7 @@ export component AppWindow inherits Window {
         Text {
             x: margin;
             y: 40 * u;
-            text: "Add games";
+            text: add-title;
             font-size: 40 * u;
             font-weight: 600;
             color: white;
@@ -1180,12 +1183,43 @@ export component AppWindow inherits Window {
             overflow: elide;
         }
 
+        // Where the results come from, and how to change it.
+        if add-mode == 0: HorizontalLayout {
+            x: margin;
+            y: 134 * u;
+            height: 36 * u;
+            spacing: 10 * u;
+            alignment: start;
+            Text {
+                text: "\u{E8B7}";
+                font-family: "Segoe MDL2 Assets";
+                font-size: 18 * u;
+                color: #8cc4ff;
+                vertical-alignment: center;
+            }
+
+            Text {
+                text: add-place;
+                font-size: 19 * u;
+                color: #8cc4ff;
+                vertical-alignment: center;
+                overflow: elide;
+            }
+
+            Text {
+                text: "·  LB to change";
+                font-size: 19 * u;
+                color: #ffffff73;
+                vertical-alignment: center;
+            }
+        }
+
         for row[i] in add-rows: AddRowView {
             data: row;
             selected: i == add-index;
             u: u;
             x: margin;
-            y: 170 * u + (i - scroll) * row-pitch;
+            y: list-y + (i - scroll) * row-pitch;
             width: root.width - 2 * margin;
             height: row-h;
             visible: i >= scroll && i < scroll + visible-rows;
@@ -1194,11 +1228,11 @@ export component AppWindow inherits Window {
 
         if add-rows.length == 0: VerticalLayout {
             x: margin;
-            y: 300 * u;
+            y: 320 * u;
             width: root.width - 2 * margin;
             spacing: 18 * u;
             Text {
-                text: add-scanning ? "\u{E721}" : "\u{E7FC}";
+                text: add-mode != 0 ? "\u{E8B7}" : add-scanning ? "\u{E721}" : "\u{E7FC}";
                 font-family: "Segoe MDL2 Assets";
                 font-size: 64 * u;
                 color: #ffffff59;
@@ -1206,7 +1240,7 @@ export component AppWindow inherits Window {
             }
 
             Text {
-                text: add-scanning ? "Looking through your drives for installed games" : "Nothing new to add";
+                text: add-mode != 0 ? "This folder has no subfolders" : add-scanning ? "Looking through " + add-place.to-lowercase() : "Nothing new to add here";
                 font-size: 30 * u;
                 font-weight: 300;
                 color: #ffffffcc;
@@ -1214,20 +1248,20 @@ export component AppWindow inherits Window {
             }
 
             Text {
-                text: add-scanning ? "External drives count too, as long as they are plugged in" : "Install a game anywhere on your drives, then press RB to look again";
+                text: add-mode != 0 ? "Press Y to look in it anyway, or B to go up" : add-scanning ? "External drives count too, as long as they are plugged in" : "Press LB to look somewhere else, or RB to look again";
                 font-size: 20 * u;
                 color: #ffffff73;
                 horizontal-alignment: center;
             }
         }
 
-        HorizontalLayout {
+        if add-mode == 0: HorizontalLayout {
             x: margin;
             y: root.height - 66 * u;
             width: root.width - 2 * margin;
             height: 46 * u;
             alignment: end;
-            spacing: 32 * u;
+            spacing: 30 * u;
             ButtonHint {
                 key: "A";
                 label: "Add";
@@ -1247,6 +1281,12 @@ export component AppWindow inherits Window {
             }
 
             ButtonHint {
+                key: "LB";
+                label: "Where to look";
+                u: u;
+            }
+
+            ButtonHint {
                 key: "RB";
                 label: "Look again";
                 u: u;
@@ -1255,6 +1295,52 @@ export component AppWindow inherits Window {
             ButtonHint {
                 key: "B";
                 label: "Back";
+                u: u;
+            }
+        }
+
+        if add-mode == 1: HorizontalLayout {
+            x: margin;
+            y: root.height - 66 * u;
+            width: root.width - 2 * margin;
+            height: 46 * u;
+            alignment: end;
+            spacing: 30 * u;
+            ButtonHint {
+                key: "A";
+                label: "Choose";
+                u: u;
+            }
+
+            ButtonHint {
+                key: "B";
+                label: "Back";
+                u: u;
+            }
+        }
+
+        if add-mode == 2: HorizontalLayout {
+            x: margin;
+            y: root.height - 66 * u;
+            width: root.width - 2 * margin;
+            height: 46 * u;
+            alignment: end;
+            spacing: 30 * u;
+            ButtonHint {
+                key: "A";
+                label: "Open";
+                u: u;
+            }
+
+            ButtonHint {
+                key: "Y";
+                label: "Look in this folder";
+                u: u;
+            }
+
+            ButtonHint {
+                key: "B";
+                label: "Up";
                 u: u;
             }
         }
