@@ -86,15 +86,43 @@ struct Item {
 /// The Steam app for this title, if the store lists one that is clearly the same game.
 /// Games Steam no longer sells don't appear here (see `pcgw`).
 pub fn find(title: &str) -> Result<Option<u32>, net::Error> {
+    let apps = search(title)?;
+    Ok(best_title(title, apps.iter().map(|(_, name)| name.as_str())).map(|index| apps[index].0))
+}
+
+/// Every app the store search returns for `title`, most relevant first: (app id, name).
+pub fn search(title: &str) -> Result<Vec<(u32, String)>, net::Error> {
     let body = net::get(&format!("{SEARCH}{}", net::encode(title)))?;
     let search: Search = serde_json::from_slice(&body)
         .map_err(|e| net::Error::Failed(format!("unexpected Steam answer: {e}")))?;
-    let apps: Vec<&Item> = search
+    Ok(search
         .items
-        .iter()
+        .into_iter()
         .filter(|i| i.kind.is_empty() || i.kind == "app")
-        .collect();
-    Ok(best_title(title, apps.iter().map(|i| i.name.as_str())).map(|index| apps[index].id))
+        .map(|i| (i.id, i.name))
+        .collect())
+}
+
+/// Soundtracks, DLC, passes: products sold under a game's name that aren't the game.
+pub fn is_add_on(name: &str) -> bool {
+    normalize(name)
+        .split(' ')
+        .any(|word| NOT_THE_GAME.contains(&word))
+}
+
+/// The Steam images for a slot ("icon", "hero", "logo"), sharpest first.
+pub fn image_urls(app: u32, slot: &str) -> Vec<String> {
+    SLOTS
+        .iter()
+        .filter(|(name, _)| *name == slot)
+        .flat_map(|(_, sources)| sources.iter())
+        .map(|source| format!("{IMAGES}/{app}/{source}"))
+        .collect()
+}
+
+/// The store banner (460x215), shown as a cover when nothing better exists.
+pub fn banner_url(app: u32) -> String {
+    format!("{IMAGES}/{app}/header.jpg")
 }
 
 /// Index of the name that is the same game as `title`: an exact match first, then another
@@ -200,6 +228,24 @@ pub fn download(app: u32, dir: &Path, wanted: &[&str]) -> Result<usize, net::Err
 
 /// Older games have no library background; a full-size store screenshot stands in for it.
 pub fn download_screenshot(app: u32, dir: &Path) -> Result<bool, net::Error> {
+    match screenshot_urls(app)?.into_iter().next() {
+        Some(url) => save(&url, dir, "hero"),
+        None => Ok(false),
+    }
+}
+
+/// Full-size store screenshots (1920x1080), in store order; empty when the store page is gone.
+pub fn screenshot_urls(app: u32) -> Result<Vec<String>, net::Error> {
+    Ok(screenshots(app)?.into_iter().map(|s| s.full).collect())
+}
+
+/// A store screenshot: a light 600x338 version for previews and the full 1920x1080 one.
+pub struct Shot {
+    pub thumbnail: String,
+    pub full: String,
+}
+
+pub fn screenshots(app: u32) -> Result<Vec<Shot>, net::Error> {
     #[derive(Deserialize)]
     struct Details {
         #[serde(default)]
@@ -213,31 +259,36 @@ pub fn download_screenshot(app: u32, dir: &Path) -> Result<bool, net::Error> {
     }
     #[derive(Deserialize)]
     struct Screenshot {
+        path_thumbnail: String,
         path_full: String,
     }
     let body = net::get(&format!("{DETAILS}{app}"))?;
     let details: std::collections::HashMap<String, Details> =
         serde_json::from_slice(&body).unwrap_or_default();
-    let url = details
+    Ok(details
         .into_values()
         .find(|d| d.success)
         .and_then(|d| d.data)
-        .and_then(|d| d.screenshots.into_iter().next())
-        .map(|s| s.path_full);
-    match url {
-        Some(url) => save(&url, dir, "hero"),
-        None => Ok(false),
-    }
+        .map(|d| {
+            d.screenshots
+                .into_iter()
+                .map(|s| Shot {
+                    thumbnail: s.path_thumbnail,
+                    full: s.path_full,
+                })
+                .collect()
+        })
+        .unwrap_or_default())
 }
 
-/// The small store banner (460x215), kept for games Steam has no cover for.
+/// The small store banner, kept for games Steam has no cover for.
 pub fn download_banner(app: u32, dir: &Path) -> Result<bool, net::Error> {
-    save(&format!("{IMAGES}/{app}/header.jpg"), dir, "icon")
+    save(&banner_url(app), dir, "icon")
 }
 
-/// Saves the image at `url` as `<slot>.<jpg|png>` in `dir`. Ok(false) when the server has no
+/// Saves the image at `url` as `<name>.<jpg|png>` in `dir`. Ok(false) when the server has no
 /// such image; never replaces a file that is already there.
-pub fn save(url: &str, dir: &Path, slot: &str) -> Result<bool, net::Error> {
+pub fn save(url: &str, dir: &Path, name: &str) -> Result<bool, net::Error> {
     let bytes = match net::get(url) {
         Ok(bytes) => bytes,
         Err(net::Error::Status(_)) => return Ok(false),
@@ -250,11 +301,11 @@ pub fn save(url: &str, dir: &Path, slot: &str) -> Result<bool, net::Error> {
     } else {
         return Ok(false);
     };
-    if find_image(dir, slot).is_some() {
+    if find_image(dir, name).is_some() {
         return Ok(false);
     }
     fs::create_dir_all(dir).map_err(|e| net::Error::Failed(format!("{}: {e}", dir.display())))?;
-    let target = dir.join(format!("{slot}.{extension}"));
+    let target = dir.join(format!("{name}.{extension}"));
     // Written aside then renamed, so a half-downloaded file is never shown.
     let temp = target.with_extension("part");
     fs::write(&temp, &bytes)
@@ -286,6 +337,17 @@ mod tests {
             best("PRO EVOLUTION SOCCER 2019", &["Pro Evolution Soccer 2019"]),
             Some(0)
         );
+    }
+
+    #[test]
+    fn add_ons_are_recognised() {
+        assert!(is_add_on("God of War Soundtrack"));
+        assert!(is_add_on(
+            "Demon Slayer -Kimetsu no Yaiba- The Hinokami Chronicles: Character Pass"
+        ));
+        assert!(!is_add_on("Grand Theft Auto V Enhanced"));
+        assert_eq!(image_urls(10, "logo").len(), 2);
+        assert!(image_urls(10, "icon")[0].ends_with("/10/library_600x900_2x.jpg"));
     }
 
     #[test]

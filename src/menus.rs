@@ -12,6 +12,8 @@ pub enum Overlay {
     Settings,
     Controllers,
     AddGames,
+    /// The Choose art screen (opened from a game's menu, not the panel).
+    Art,
 }
 
 /// Quick panel tiles, laid out two per row.
@@ -113,7 +115,7 @@ impl Menus {
             Overlay::Power => self.handle_power(action),
             Overlay::Settings => self.handle_settings(action),
             // These screens have their own logic; this only covers leaving them.
-            Overlay::Controllers | Overlay::AddGames => {
+            Overlay::Controllers | Overlay::AddGames | Overlay::Art => {
                 if action == Action::Back {
                     self.overlay = Overlay::Panel;
                 }

@@ -28,6 +28,8 @@ pub enum SheetItem {
     CloseGame,
     ControllerMode,
     ToggleFavorite,
+    /// Choose the cover, background and logo among everything found.
+    ChangeArt,
     /// Only for games added from the launcher; their files are never touched.
     Remove,
 }
@@ -56,6 +58,8 @@ pub enum Effect {
     Unavailable(usize),
     /// Take a launcher-added game out of the library.
     Remove(usize),
+    /// Open the Choose art screen for this game.
+    ChangeArt(usize),
 }
 
 /// Everything a key press can change, compared before/after to pick a feedback sound.
@@ -142,6 +146,7 @@ impl Home {
         items.push(SheetItem::ToggleFavorite);
         // After the everyday items, so they keep their positions whatever the game.
         items.push(SheetItem::ControllerMode);
+        items.push(SheetItem::ChangeArt);
         if self.games[game].removable && Some(game) != self.running {
             items.push(SheetItem::Remove);
         }
@@ -384,6 +389,7 @@ impl Home {
                     SheetItem::CloseGame => vec![Effect::CloseGame],
                     SheetItem::ControllerMode => unreachable!("handled above"),
                     SheetItem::Remove => vec![Effect::Remove(game)],
+                    SheetItem::ChangeArt => vec![Effect::ChangeArt(game)],
                     SheetItem::ToggleFavorite => {
                         let id = self.games[game].id.clone();
                         self.state.toggle_favorite(&id);
@@ -614,7 +620,8 @@ mod tests {
                 SheetItem::Resume,
                 SheetItem::CloseGame,
                 SheetItem::ToggleFavorite,
-                SheetItem::ControllerMode
+                SheetItem::ControllerMode,
+                SheetItem::ChangeArt
             ]
         );
         home.handle(Action::Down);
@@ -678,7 +685,8 @@ mod tests {
             [
                 SheetItem::Play,
                 SheetItem::ToggleFavorite,
-                SheetItem::ControllerMode
+                SheetItem::ControllerMode,
+                SheetItem::ChangeArt
             ]
         );
         home.handle(Action::Down);

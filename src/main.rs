@@ -2,6 +2,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod add_games;
+mod art_picker;
 mod audio;
 mod background;
 mod config;
@@ -102,6 +103,15 @@ struct App {
     /// The Add games screen, and the switch that stops its drive scan.
     add_games: add_games::AddGames,
     scan_cancel: Arc<AtomicBool>,
+    /// The Choose art screen while open, its thumbnails (same order as its choices), and the
+    /// switch that stops its downloads.
+    art_picker: Option<art_picker::ArtPicker>,
+    art_thumbs: [Vec<Image>; 3],
+    art_cancel: Arc<AtomicBool>,
+    /// (game id, slot) -> (token, art folder) of a picked preview whose sharp version is on
+    /// its way; a later pick for the same slot replaces the token, so a late arrival is ignored.
+    art_upgrades: HashMap<(String, usize), (u64, PathBuf)>,
+    art_upgrade_token: u64,
 }
 
 fn main() -> Result<(), slint::PlatformError> {
@@ -109,6 +119,8 @@ fn main() -> Result<(), slint::PlatformError> {
     let data_dir = config::data_dir();
     // Created here so even config errors are logged; the folder may not exist on first run.
     let _ = std::fs::create_dir_all(&data_dir);
+    // Pictures downloaded for the Choose art screen are only needed while it is open.
+    let _ = std::fs::remove_dir_all(art_choices_dir(&data_dir));
     diag::init(&data_dir);
     let mut problems = Vec::new();
     let state_path = data_dir.join("state.json");
@@ -184,6 +196,11 @@ fn main() -> Result<(), slint::PlatformError> {
         notifier,
         add_games: add_games::AddGames::default(),
         scan_cancel: Arc::new(AtomicBool::new(false)),
+        art_picker: None,
+        art_thumbs: Default::default(),
+        art_cancel: Arc::new(AtomicBool::new(false)),
+        art_upgrades: HashMap::new(),
+        art_upgrade_token: 0,
     }));
 
     {
@@ -337,6 +354,7 @@ fn apply_effects(ui: &AppWindow, app_rc: &Rc<RefCell<App>>, effects: &[Effect]) 
                 push_menus(ui, &app);
             }
             Effect::Remove(game) => remove_game(ui, &mut app, *game),
+            Effect::ChangeArt(game) => open_art_picker(ui, &mut app, *game),
             Effect::Unavailable(game) => {
                 // The drive may have been plugged in since the last check.
                 let missing = {
@@ -488,6 +506,7 @@ fn push_scalars(ui: &AppWindow, home: &Home) {
                 }
                 SheetItem::ToggleFavorite => "Add to Favorites".into(),
                 SheetItem::Remove => "Remove from library".into(),
+                SheetItem::ChangeArt => "Change art".into(),
             })
             .collect();
         ui.set_sheet_items(ModelRc::new(VecModel::from(items)));
@@ -508,7 +527,14 @@ fn show_hero(ui: &AppWindow, app: &mut App) {
     let path = home
         .selected_game()
         .map(|i| &home.games[i].art)
-        .and_then(|art| art.hero.clone().or_else(|| art.icon.clone()));
+        .and_then(|art| {
+            // Without hero art the cover fills the screen, unless "None" was chosen for it.
+            if art.hero_off {
+                None
+            } else {
+                art.hero.clone().or_else(|| art.icon.clone())
+            }
+        });
     if path == *shown_hero {
         return;
     }
@@ -544,6 +570,55 @@ fn drain_background(ui: &AppWindow, app: &mut App) {
             background::Event::Hero { path, pixels } => hero_loaded(ui, app, path, pixels),
             background::Event::ArtFile { id } => refresh_art(ui, app, &id),
             background::Event::Art { id, outcome } => art_fetched(ui, app, id, outcome),
+            background::Event::ArtChoice {
+                game,
+                slot,
+                path,
+                label,
+                hash,
+                in_use,
+                full,
+                thumbnail,
+            } => {
+                let Some(picker) = app.art_picker.as_mut().filter(|p| p.game == game) else {
+                    continue;
+                };
+                if let Some(index) = picker.add(slot, path, label, hash, in_use, full) {
+                    let image = thumbnail
+                        .map(scaled_art::Pixels::into_image)
+                        .unwrap_or_default();
+                    app.art_thumbs[slot].insert(index, image);
+                    sync_art_screen(ui, app);
+                }
+            }
+            background::Event::ArtUpgrade {
+                game,
+                slot,
+                token,
+                path,
+            } => {
+                let key = (game.clone(), slot);
+                let Some((_, dir)) = app.art_upgrades.get(&key).filter(|(t, _)| *t == token) else {
+                    continue;
+                };
+                let dir = dir.clone();
+                app.art_upgrades.remove(&key);
+                match library::replace_art(&dir, art_picker::SLOTS[slot], Some(&path)) {
+                    Ok(()) => refresh_game_art(ui, app, &game, &dir),
+                    Err(e) => diag::log(&e),
+                }
+            }
+            background::Event::ArtChoicesDone { game, error } => {
+                if let Some(picker) = app.art_picker.as_mut().filter(|p| p.game == game) {
+                    picker.searching = false;
+                    if let Some(e) = error {
+                        diag::log(&format!("art choices for {game}: {e}"));
+                        app.toasts
+                            .show(ui, "Couldn't reach Steam: showing what was found".into());
+                    }
+                    sync_art_screen(ui, app);
+                }
+            }
             background::Event::Listing { dir, folders } => {
                 app.add_games.set_listing(&dir, folders);
                 sync_add_games_screen(ui, app);
@@ -606,6 +681,7 @@ fn queue_art_lookups(app: &mut App) {
         ..
     } = app;
     for game in &home.games {
+        let folder = art_dir.join(library::safe_file_name(&game.title));
         if game.platform != "PC"
             || home.state.art_lookups.contains_key(&game.id)
             || art_pending.contains(&game.id)
@@ -619,6 +695,8 @@ fn queue_art_lookups(app: &mut App) {
             (game.art.logo.is_none(), "logo"),
         ]
         .into_iter()
+        // A slot turned off on the Choose art screen stays empty.
+        .filter(|(_, slot)| !library::art_turned_off(&folder, slot))
         .filter_map(|(missing, file)| missing.then_some(file))
         .collect();
         if wanted.is_empty() {
@@ -627,7 +705,7 @@ fn queue_art_lookups(app: &mut App) {
         let job = ArtJob {
             id: game.id.clone(),
             title: game.title.clone(),
-            dir: art_dir.join(library::safe_file_name(&game.title)),
+            dir: folder,
             wanted,
         };
         if art_fetcher.send(job).is_ok() {
@@ -820,6 +898,7 @@ fn sound_for(
                 | Effect::ControllerMode(_)
                 | Effect::OpenPanel
                 | Effect::Remove(_)
+                | Effect::ChangeArt(_)
         )
     }) {
         return Some(Sound::Confirm);
@@ -1076,6 +1155,10 @@ fn handle_menu_action(ui: &AppWindow, app: &mut App, action: Action) {
         handle_controllers_action(ui, app, action);
         return;
     }
+    if app.menus.overlay == Overlay::Art && action != Action::Menu {
+        handle_art_action(ui, app, action);
+        return;
+    }
     if app.menus.overlay == Overlay::AddGames && action != Action::Menu {
         handle_add_games_action(ui, app, action);
         return;
@@ -1139,6 +1222,188 @@ fn handle_menu_action(ui: &AppWindow, app: &mut App, action: Action) {
     push_menus(ui, app);
     sync_controllers_screen(ui, app);
     sync_add_games_screen(ui, app);
+    sync_art_screen(ui, app);
+}
+
+fn art_choices_dir(data_dir: &Path) -> PathBuf {
+    data_dir.join("cache").join("art-choices")
+}
+
+/// Opens the Choose art screen for a game and starts gathering its choices.
+fn open_art_picker(ui: &AppWindow, app: &mut App, game: usize) {
+    let data_dir = config::data_dir();
+    let game = &app.home.games[game];
+    let folder = library::safe_file_name(&game.title);
+    let mut picker = art_picker::ArtPicker::new(
+        game.id.clone(),
+        game.title.clone(),
+        data_dir.join("art").join(&folder),
+    );
+    let current = [
+        game.art.icon.clone(),
+        game.art.hero.clone(),
+        game.art.logo.clone(),
+    ];
+    for (slot, art) in current.iter().enumerate() {
+        if art.is_none() {
+            picker.none_in_use(slot);
+        }
+    }
+    let job = background::ChoicesJob {
+        game: game.id.clone(),
+        title: game.title.clone(),
+        cache: art_choices_dir(&data_dir).join(folder),
+        current,
+        scale: scaled_art::screen_scale(),
+    };
+    app.art_cancel.store(true, Ordering::Relaxed);
+    app.art_cancel = Arc::new(AtomicBool::new(false));
+    background::spawn_art_choices(app.notifier.clone(), job, app.art_cancel.clone());
+    app.art_picker = Some(picker);
+    app.art_thumbs = Default::default();
+    app.menus.overlay = Overlay::Art;
+    push_menus(ui, app);
+    sync_art_screen(ui, app);
+}
+
+/// The Choose art screen: Up/Down pick the row, Left/Right a picture, A uses it, B closes.
+fn handle_art_action(ui: &AppWindow, app: &mut App, action: Action) {
+    let Some(picker) = app.art_picker.as_mut() else {
+        return;
+    };
+    let before = (picker.slot, picker.focus);
+    let effect = picker.handle(action);
+    let after = (picker.slot, picker.focus);
+    let sound = match effect {
+        Some(art_picker::Effect::Apply { slot, index }) => {
+            apply_art(ui, app, slot, index);
+            Some(Sound::Confirm)
+        }
+        Some(art_picker::Effect::Close) => {
+            app.menus.overlay = Overlay::None;
+            push_menus(ui, app);
+            Some(Sound::Back)
+        }
+        None if before.0 != after.0 => Some(Sound::Tab),
+        None if before != after => Some(Sound::Move),
+        None => matches!(
+            action,
+            Action::Up | Action::Down | Action::Left | Action::Right
+        )
+        .then_some(Sound::Bump),
+    };
+    if let Some(sound) = sound {
+        play_sound(app, sound);
+    }
+    sync_art_screen(ui, app);
+}
+
+/// Makes the picked picture the game's art and shows it at once.
+fn apply_art(ui: &AppWindow, app: &mut App, slot: usize, index: usize) {
+    let Some(picker) = app.art_picker.as_mut() else {
+        return;
+    };
+    let choice = picker.choices[slot][index].clone();
+    let dir = picker.art_dir.clone();
+    let game_id = picker.game.clone();
+    if let Err(e) = library::replace_art(&dir, art_picker::SLOTS[slot], choice.path.as_deref()) {
+        diag::log(&e);
+        app.toasts.show(ui, e);
+        return;
+    }
+    picker.applied(slot, index);
+    // The preview shows at once; the sharp version replaces it when it arrives.
+    let key = (game_id.clone(), slot);
+    match choice.full {
+        Some(url) => {
+            app.art_upgrade_token += 1;
+            let token = app.art_upgrade_token;
+            app.art_upgrades.insert(key, (token, dir.clone()));
+            let folder = library::safe_file_name(&picker.title);
+            let cache = art_choices_dir(&config::data_dir()).join(folder);
+            let notifier = app.notifier.clone();
+            background::spawn_art_upgrade(notifier, url, cache, game_id.clone(), slot, token);
+        }
+        None => {
+            app.art_upgrades.remove(&key);
+        }
+    }
+    refresh_game_art(ui, app, &game_id, &dir);
+}
+
+/// A game's art folder changed: show its new pictures everywhere.
+fn refresh_game_art(ui: &AppWindow, app: &mut App, game_id: &str, dir: &Path) {
+    let art_root = config::data_dir().join("art");
+    if let Some(game) = app.home.games.iter_mut().find(|g| g.id == game_id) {
+        library::apply_art_folder(game, &art_root);
+    }
+    // The new file can have the old one's name: forget what was decoded from that folder.
+    app.images
+        .icons
+        .retain(|(path, _), _| !path.starts_with(dir));
+    app.images.heroes.retain(|(path, _)| !path.starts_with(dir));
+    app.shown_hero = None;
+    if app.in_background {
+        return;
+    }
+    push_tabs(ui, app);
+    push_selection(ui, app);
+    show_hero(ui, app);
+}
+
+/// Mirrors the Choose art screen into the window; leaving it stops its downloads.
+fn sync_art_screen(ui: &AppWindow, app: &mut App) {
+    if app.menus.overlay != Overlay::Art {
+        if app.art_picker.take().is_some() {
+            app.art_cancel.store(true, Ordering::Relaxed);
+            app.art_thumbs = Default::default();
+            ui.set_art_rows(ModelRc::default());
+        }
+        return;
+    }
+    let Some(picker) = &app.art_picker else {
+        return;
+    };
+    const NAMES: [&str; 3] = ["Cover", "Background", "Logo"];
+    let rows: Vec<ArtRow> = (0..3)
+        .map(|slot| {
+            let choices = &picker.choices[slot];
+            let focus = picker.focus[slot].min(choices.len() - 1);
+            let thumbs: Vec<ArtThumb> = choices
+                .iter()
+                .enumerate()
+                .map(|(i, choice)| ArtThumb {
+                    has_image: choice.path.is_some(),
+                    image: app.art_thumbs[slot].get(i).cloned().unwrap_or_default(),
+                    in_use: choice.in_use,
+                })
+                .collect();
+            ArtRow {
+                name: NAMES[slot].into(),
+                label: format!(
+                    "{} of {}  ·  {}",
+                    focus + 1,
+                    choices.len(),
+                    choices[focus].label
+                )
+                .into(),
+                focus: focus as i32,
+                thumbs: ModelRc::new(VecModel::from(thumbs)),
+            }
+        })
+        .collect();
+    let found: usize = picker.choices.iter().map(|row| row.len() - 1).sum();
+    ui.set_art_title(picker.title.as_str().into());
+    ui.set_art_status(
+        if picker.searching {
+            format!("Looking for art on Steam and PCGamingWiki… {found} pictures so far")
+        } else {
+            format!("{found} pictures found · the one marked In use is shown now")
+        }
+        .into(),
+    );
+    ui.set_art_slot(picker.slot as i32);
+    ui.set_art_rows(ModelRc::new(VecModel::from(rows)));
 }
 
 /// Starts looking for games in `place`: every fixed and removable drive, or one drive or folder.
@@ -1687,6 +1952,7 @@ fn push_menus(ui: &AppWindow, app: &App) {
         Overlay::Settings => 3,
         Overlay::Controllers => 4,
         Overlay::AddGames => 5,
+        Overlay::Art => 6,
     });
     ui.set_panel_index(menus.panel_focus as i32);
     ui.set_power_index(menus.power_focus as i32);

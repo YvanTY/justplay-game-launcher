@@ -316,6 +316,77 @@ component AddRowView inherits Rectangle {
     }
 }
 
+export struct ArtThumb {
+    image: image,
+    // False for the "None" choice.
+    has-image: bool,
+    in-use: bool,
+}
+
+export struct ArtRow {
+    name: string,
+    // "3 of 9 · Steam · God of War"
+    label: string,
+    focus: int,
+    thumbs: [ArtThumb],
+}
+
+// One picture on the Choose art screen.
+component ArtThumbView inherits Rectangle {
+    in property <ArtThumb> data;
+    in property <bool> selected;
+    in property <bool> row-active;
+    // Logos sit on a dark plate, shown whole; covers and backgrounds fill their box.
+    in property <bool> plate;
+    in property <length> u;
+    border-radius: 12 * u;
+    background: data.has-image ? (plate ? #0b0f17 : #101521) : #ffffff08;
+    clip: true;
+    // A picture much wider than its box (a store banner in the cover row) is shown whole on the
+    // plate color instead of being cropped to a sliver.
+    property <bool> whole: plate || data.image.width * root.height > data.image.height * root.width * 2.2;
+    if data.has-image: Image {
+        x: whole ? 12 * u : 0;
+        y: whole ? 12 * u : 0;
+        width: parent.width - (whole ? 24 * u : 0);
+        height: parent.height - (whole ? 24 * u : 0);
+        source: data.image;
+        image-fit: whole ? ImageFit.contain : ImageFit.cover;
+    }
+    if !data.has-image: Text {
+        width: parent.width;
+        height: parent.height;
+        text: "None";
+        font-size: 24 * u;
+        color: #ffffff8c;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+    if data.in-use: Rectangle {
+        x: parent.width - self.width - 8 * u;
+        y: 8 * u;
+        width: in-use-text.preferred-width + 20 * u;
+        height: 28 * u;
+        border-radius: self.height / 2;
+        background: #2ecc71;
+        in-use-text := Text {
+            width: parent.width;
+            height: parent.height;
+            text: "In use";
+            font-size: 15 * u;
+            font-weight: 700;
+            color: white;
+            horizontal-alignment: center;
+            vertical-alignment: center;
+        }
+    }
+    Rectangle {
+        border-radius: parent.border-radius;
+        border-width: selected ? (row-active ? 4 * u : 2 * u) : (data.has-image ? 0 : 1px);
+        border-color: selected ? (row-active ? white : #ffffff59) : #ffffff33;
+    }
+}
+
 export struct TabInfo {
     name: string,
     count: int,
@@ -481,7 +552,7 @@ export component AppWindow inherits Window {
     in property <string> clock;
     in property <string> date;
 
-    // 0 none, 1 quick panel, 2 power, 3 settings, 4 controllers, 5 add games
+    // 0 none, 1 quick panel, 2 power, 3 settings, 4 controllers, 5 add games, 6 choose art
     in property <int> overlay;
     in property <int> panel-index;
     in property <int> power-index;
@@ -502,6 +573,10 @@ export component AppWindow inherits Window {
     in property <string> add-status;
     // 0 results, 1 where to look, 2 folder browser
     in property <int> add-mode;
+    in property <[ArtRow]> art-rows;
+    in property <int> art-slot;
+    in property <string> art-title;
+    in property <string> art-status;
     in property <string> add-title: "Add games";
     in property <string> add-place;
     in property <string> toast;
@@ -1346,12 +1421,136 @@ export component AppWindow inherits Window {
         }
     }
 
+    // --- Choose art screen ---
+    if overlay == 6: Rectangle {
+        // Per row: top, thumbnail size (covers portrait, backgrounds wide, logos on a plate).
+        property <[{y: length, w: length, h: length}]> rows: [
+            { y: 200 * u, w: 150 * u, h: 225 * u },
+            { y: 506 * u, w: 340 * u, h: 191 * u },
+            { y: 790 * u, w: 320 * u, h: 140 * u },
+        ];
+        property <length> gap: 22 * u;
+        background: @radial-gradient(circle, #1a2744 0%, #0d1320 45%, #080b12 100%);
+
+        Text {
+            x: margin;
+            y: 40 * u;
+            text: "Choose art";
+            font-size: 40 * u;
+            font-weight: 600;
+            color: white;
+        }
+
+        Text {
+            x: margin + 230 * u;
+            y: 52 * u;
+            width: root.width - self.x - margin;
+            text: art-title;
+            font-size: 28 * u;
+            font-weight: 300;
+            color: #ffffffcc;
+            overflow: elide;
+        }
+
+        Text {
+            x: margin;
+            y: 96 * u;
+            width: root.width - 2 * margin;
+            text: art-status;
+            font-size: 20 * u;
+            font-weight: 300;
+            color: #ffffff99;
+            overflow: elide;
+        }
+
+        for row[r] in art-rows: Rectangle {
+            property <bool> active: r == art-slot;
+            property <length> pitch: rows[r].w + gap;
+            // Keeps the selected picture in view with a few before it.
+            property <int> scroll: Math.max(0, row.focus - Math.floor((root.width - 2 * margin) / pitch / 2));
+            x: 0;
+            y: rows[r].y - 46 * u;
+            width: root.width;
+            height: rows[r].h + 46 * u;
+
+            HorizontalLayout {
+                x: margin;
+                y: 0;
+                height: 34 * u;
+                spacing: 14 * u;
+                alignment: start;
+                Text {
+                    text: row.name;
+                    font-size: 24 * u;
+                    font-weight: active ? 700 : 400;
+                    color: active ? white : #ffffff8c;
+                    vertical-alignment: center;
+                }
+
+                Text {
+                    text: row.label;
+                    font-size: 18 * u;
+                    color: active ? #8cc4ff : #ffffff59;
+                    vertical-alignment: center;
+                    overflow: elide;
+                }
+            }
+
+            for thumb[i] in row.thumbs: ArtThumbView {
+                data: thumb;
+                selected: i == row.focus;
+                row-active: active;
+                plate: r == 2;
+                u: u;
+                x: margin + (i - scroll) * pitch;
+                y: 46 * u;
+                width: rows[r].w;
+                height: rows[r].h;
+                visible: self.x > -self.width && self.x < root.width;
+                opacity: active || i == row.focus ? 1 : 0.6;
+                animate x { duration: 150ms; easing: ease-out; }
+            }
+        }
+
+        HorizontalLayout {
+            x: margin;
+            y: root.height - 66 * u;
+            width: root.width - 2 * margin;
+            height: 46 * u;
+            alignment: end;
+            spacing: 30 * u;
+            ButtonHint {
+                key: "← →";
+                label: "Choose";
+                u: u;
+            }
+
+            ButtonHint {
+                key: "↑ ↓";
+                label: "Cover / Background / Logo";
+                u: u;
+            }
+
+            ButtonHint {
+                key: "A";
+                label: "Use this";
+                u: u;
+            }
+
+            ButtonHint {
+                key: "B";
+                label: "Done";
+                u: u;
+            }
+        }
+    }
+
     // Messages sit in the empty band between the game row and the title, clear of every row.
     Rectangle {
         // Beside the quick panel while it is open, so messages never cover its tiles.
         x: (overlay == 1 || overlay == 2 ? root.width - 620 * u : root.width) - margin - self.width;
         // The Controllers screen fills the band below the header, so messages use the header's corner there.
-        y: overlay == 4 || overlay == 5 ? 44 * u : 320 * u;
+        y: overlay >= 4 ? 44 * u : 320 * u;
         width: min(toast-text.preferred-width + 60 * u, root.width - 2 * margin);
         height: 60 * u;
         border-radius: self.height / 2;

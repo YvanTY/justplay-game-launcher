@@ -28,6 +28,31 @@ pub enum Event {
         id: String,
         outcome: ArtOutcome,
     },
+    /// One more picture for the Choose art screen (`slot` 0 cover, 1 background, 2 logo),
+    /// with its thumbnail already decoded.
+    ArtChoice {
+        game: String,
+        slot: usize,
+        path: PathBuf,
+        label: String,
+        hash: u64,
+        in_use: bool,
+        /// The sharp version to fetch if this choice is picked.
+        full: Option<String>,
+        thumbnail: Option<Pixels>,
+    },
+    /// The sharp version of a picked choice arrived (`token` tells a later pick apart).
+    ArtUpgrade {
+        game: String,
+        slot: usize,
+        token: u64,
+        path: PathBuf,
+    },
+    /// The Choose art screen has every choice there is; `error` when Steam couldn't be reached.
+    ArtChoicesDone {
+        game: String,
+        error: Option<String>,
+    },
     /// The folder browser's listing of `dir`.
     Listing {
         dir: PathBuf,
@@ -197,6 +222,225 @@ fn fetch_art(job: &ArtJob, mut on_image: impl FnMut()) -> Result<ArtOutcome, net
     } else {
         ArtOutcome::NoMatch
     })
+}
+
+pub struct ChoicesJob {
+    pub game: String,
+    pub title: String,
+    /// Where downloaded choices are kept (reused if the screen is opened again).
+    pub cache: PathBuf,
+    /// The art in use per slot.
+    pub current: [Option<PathBuf>; 3],
+    pub scale: f32,
+}
+
+/// Gathers every picture worth offering on the Choose art screen.
+pub fn spawn_art_choices(notifier: Notifier, job: ChoicesJob, cancel: Arc<AtomicBool>) {
+    let spawned = std::thread::Builder::new()
+        .name("art-choices".into())
+        .spawn(move || {
+            let error = gather_choices(&notifier, &job, &cancel)
+                .err()
+                .map(|e| e.to_string());
+            notifier.send(Event::ArtChoicesDone {
+                game: job.game,
+                error,
+            });
+        });
+    if let Err(e) = spawned {
+        crate::diag::log(&format!("art choices could not start: {e}"));
+    }
+}
+
+/// The art in use, then every store match's pictures (one worker per match, so the covers of
+/// all of them show within a second or two), then PCGamingWiki's cover.
+fn gather_choices(
+    notifier: &Notifier,
+    job: &ChoicesJob,
+    cancel: &AtomicBool,
+) -> Result<(), net::Error> {
+    use crate::art_picker::SLOTS;
+    // The art in use, copied so it can be picked again after being replaced.
+    let _ = std::fs::create_dir_all(&job.cache);
+    for (slot, current) in job.current.iter().enumerate() {
+        let Some(source) = current else { continue };
+        let extension = source
+            .extension()
+            .map_or("jpg".into(), |e| e.to_string_lossy().to_lowercase());
+        let copy = job
+            .cache
+            .join(format!("in-use-{}.{extension}", SLOTS[slot]));
+        if std::fs::copy(source, &copy).is_ok() {
+            let label = "In use now".to_string();
+            offer(notifier, job, slot, copy, label, true, None);
+        }
+    }
+
+    let apps: Vec<(u32, String)> = steam::search(&job.title)?
+        .into_iter()
+        .filter(|(_, name)| !steam::is_add_on(name))
+        .take(4)
+        .collect();
+
+    // Steam's matches start downloading at once; PCGamingWiki (a slower site, several requests)
+    // is asked alongside them rather than before.
+    std::thread::scope(|scope| {
+        let workers: Vec<_> = apps
+            .iter()
+            .map(|(app, name)| {
+                let notifier = notifier.clone();
+                scope.spawn(move || choices_from_app(&notifier, job, cancel, *app, name))
+            })
+            .collect();
+        let mut result = choices_from_wiki(notifier, job, cancel, &apps);
+        for worker in workers {
+            if let Ok(Err(e)) = worker.join() {
+                result = Err(e);
+            }
+        }
+        result
+    })
+}
+
+/// PCGamingWiki's cover, and the pictures of the store page it knows if Steam's search didn't
+/// list it (a game Steam no longer sells).
+fn choices_from_wiki(
+    notifier: &Notifier,
+    job: &ChoicesJob,
+    cancel: &AtomicBool,
+    apps: &[(u32, String)],
+) -> Result<(), net::Error> {
+    let Some(wiki) = pcgw::lookup(&job.title)? else {
+        return Ok(());
+    };
+    if let Some(cover) = wiki.cover.as_deref()
+        && let Some(path) = fetch(job, cancel, cover, "wiki-cover")?
+    {
+        let label = "PCGamingWiki cover".to_string();
+        offer(notifier, job, 0, path, label, false, None);
+    }
+    match wiki.steam_app {
+        Some(app) if !apps.iter().any(|(id, _)| *id == app) => {
+            let name = format!("{} (older store page)", job.title);
+            choices_from_app(notifier, job, cancel, app, &name)
+        }
+        _ => Ok(()),
+    }
+}
+
+/// One store match: cover, logo, background, then the banner and three screenshots. Previews
+/// are the light versions (a 4K background is ~1.5 MB); the sharp one is fetched if picked.
+fn choices_from_app(
+    notifier: &Notifier,
+    job: &ChoicesJob,
+    cancel: &AtomicBool,
+    app: u32,
+    name: &str,
+) -> Result<(), net::Error> {
+    use crate::art_picker::SLOTS;
+    for slot in [0, 2, 1] {
+        let urls = steam::image_urls(app, SLOTS[slot]);
+        for url in urls.iter().rev() {
+            if let Some(path) = fetch(job, cancel, url, &format!("{app}-{}", SLOTS[slot]))? {
+                let full = urls.first().filter(|sharp| *sharp != url).cloned();
+                let label = format!("Steam · {name}");
+                offer(notifier, job, slot, path, label, false, full);
+                break;
+            }
+        }
+    }
+    let banner = steam::banner_url(app);
+    if let Some(path) = fetch(job, cancel, &banner, &format!("{app}-banner"))? {
+        let label = format!("Store banner · {name}");
+        offer(notifier, job, 0, path, label, false, None);
+    }
+    if cancel.load(Ordering::Relaxed) {
+        return Ok(());
+    }
+    for (i, shot) in steam::screenshots(app)?.into_iter().take(3).enumerate() {
+        if let Some(path) = fetch(job, cancel, &shot.thumbnail, &format!("{app}-shot{i}"))? {
+            let label = format!("Screenshot {} · {name}", i + 1);
+            offer(notifier, job, 1, path, label, false, Some(shot.full));
+        }
+    }
+    Ok(())
+}
+
+/// Downloaded once into the job's cache; Ok(None) when the server has no such picture or the
+/// screen was closed.
+fn fetch(
+    job: &ChoicesJob,
+    cancel: &AtomicBool,
+    url: &str,
+    name: &str,
+) -> Result<Option<PathBuf>, net::Error> {
+    if cancel.load(Ordering::Relaxed) {
+        return Ok(None);
+    }
+    if let Some(found) = find_image(&job.cache, name) {
+        return Ok(Some(found));
+    }
+    steam::save(url, &job.cache, name)?;
+    Ok(find_image(&job.cache, name))
+}
+
+/// Sends one choice with its thumbnail decoded here, off the UI thread.
+fn offer(
+    notifier: &Notifier,
+    job: &ChoicesJob,
+    slot: usize,
+    path: PathBuf,
+    label: String,
+    in_use: bool,
+    full: Option<String>,
+) {
+    let Ok(bytes) = std::fs::read(&path) else {
+        return;
+    };
+    let kind = if slot == 2 { Kind::Logo } else { Kind::Icon };
+    notifier.send(Event::ArtChoice {
+        game: job.game.clone(),
+        slot,
+        hash: crate::art_picker::picture_hash(&bytes),
+        thumbnail: scaled_art::decode(&path, kind, job.scale),
+        path,
+        label,
+        in_use,
+        full,
+    });
+}
+
+/// Fetches the sharp version of a picked choice into `cache`.
+pub fn spawn_art_upgrade(
+    notifier: Notifier,
+    url: String,
+    cache: PathBuf,
+    game: String,
+    slot: usize,
+    token: u64,
+) {
+    let spawned = std::thread::Builder::new()
+        .name("art-upgrade".into())
+        .spawn(move || {
+            let name = format!("full-{token}");
+            match steam::save(&url, &cache, &name) {
+                Ok(_) => {
+                    if let Some(path) = find_image(&cache, &name) {
+                        notifier.send(Event::ArtUpgrade {
+                            game,
+                            slot,
+                            token,
+                            path,
+                        });
+                    }
+                }
+                // The preview stays; it is the same picture, only smaller.
+                Err(e) => crate::diag::log(&format!("sharp art for {game}: {e}")),
+            }
+        });
+    if let Err(e) = spawned {
+        crate::diag::log(&format!("art upgrade could not start: {e}"));
+    }
 }
 
 /// Lists a folder for the Add games browser without freezing the UI on a sleeping drive.

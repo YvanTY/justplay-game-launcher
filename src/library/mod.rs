@@ -20,6 +20,8 @@ pub struct Art {
     pub logo: Option<PathBuf>,
     /// Background music played while the game is selected.
     pub music: Option<PathBuf>,
+    /// "None" was chosen for the background: a plain backdrop, not the cover blown up.
+    pub hero_off: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -181,6 +183,7 @@ fn pc_game(entry: &PcGame, removable: bool, warnings: &mut Vec<String>) -> Optio
             hero: entry.hero.clone(),
             logo: entry.logo.clone(),
             music: None,
+            hero_off: false,
         },
         xinput: entry.xinput,
         requires: vec![entry.exe.clone()],
@@ -189,7 +192,8 @@ fn pc_game(entry: &PcGame, removable: bool, warnings: &mut Vec<String>) -> Optio
     })
 }
 
-/// Art the user drops in `art\<title>\` wins over whatever a scanner found.
+/// Art the user drops in `art\<title>\` wins over whatever a scanner found. A `<slot>.none`
+/// file (the "None" choice of the Choose art screen) means no image for that slot.
 pub fn apply_art_folder(game: &mut Game, art_dir: &Path) {
     let dir = art_dir.join(safe_file_name(&game.title));
     if !dir.is_dir() {
@@ -200,13 +204,51 @@ pub fn apply_art_folder(game: &mut Game, art_dir: &Path) {
         (&mut game.art.hero, "hero"),
         (&mut game.art.logo, "logo"),
     ] {
-        if let Some(found) = find_image(&dir, stem) {
+        if dir.join(format!("{stem}.none")).exists() {
+            *slot = None;
+        } else if let Some(found) = find_image(&dir, stem) {
             *slot = Some(found);
         }
     }
+    game.art.hero_off = art_turned_off(&dir, "hero");
     if let Some(music) = crate::music::find_music(&dir) {
         game.art.music = Some(music);
     }
+}
+
+/// The user chose "None" for this slot: automatic art must not fill it again.
+pub fn art_turned_off(dir: &Path, stem: &str) -> bool {
+    dir.join(format!("{stem}.none")).exists()
+}
+
+/// Makes `source` this slot's art in `dir` (None: a `.none` marker, no image). The first image
+/// ever replaced is kept in `_original`, so the art a game came with is never lost.
+pub fn replace_art(dir: &Path, stem: &str, source: Option<&Path>) -> Result<(), String> {
+    let fail = |e: std::io::Error| format!("Could not change the art in {}: {e}", dir.display());
+    std::fs::create_dir_all(dir).map_err(fail)?;
+    let original = dir.join("_original");
+    for extension in ["png", "jpg", "jpeg", "webp", "none"] {
+        let old = dir.join(format!("{stem}.{extension}"));
+        if !old.exists() {
+            continue;
+        }
+        if extension != "none" && find_image(&original, stem).is_none() {
+            std::fs::create_dir_all(&original).map_err(fail)?;
+            std::fs::rename(&old, original.join(format!("{stem}.{extension}"))).map_err(fail)?;
+        } else {
+            std::fs::remove_file(&old).map_err(fail)?;
+        }
+    }
+    match source {
+        Some(source) => {
+            let extension = source
+                .extension()
+                .map_or("jpg".into(), |e| e.to_string_lossy().to_lowercase());
+            std::fs::copy(source, dir.join(format!("{stem}.{extension}"))).map_err(fail)?;
+        }
+        None => std::fs::write(dir.join(format!("{stem}.none")), b"").map_err(fail)?,
+    }
+    Ok(())
 }
 
 pub(crate) fn find_image(dir: &Path, stem: &str) -> Option<PathBuf> {
@@ -360,6 +402,50 @@ mod tests {
             Some(Missing::Files(elsewhere))
         );
         assert_eq!(check(&[std::env::temp_dir()], |_| None), None);
+    }
+
+    #[test]
+    fn replacing_art_keeps_the_first_original_and_none_clears_the_slot() {
+        let data = temp_data_dir("replace");
+        let dir = data.join("art").join("Game");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("icon.jpg"), b"first").unwrap();
+        let picked = data.join("picked.png");
+        std::fs::write(&picked, b"second").unwrap();
+        replace_art(&dir, "icon", Some(&picked)).unwrap();
+        assert_eq!(std::fs::read(dir.join("icon.png")).unwrap(), b"second");
+        assert!(!dir.join("icon.jpg").exists());
+        assert_eq!(
+            std::fs::read(dir.join("_original").join("icon.jpg")).unwrap(),
+            b"first"
+        );
+        replace_art(&dir, "icon", None).unwrap();
+        assert!(art_turned_off(&dir, "icon") && !dir.join("icon.png").exists());
+        assert_eq!(
+            std::fs::read(dir.join("_original").join("icon.jpg")).unwrap(),
+            b"first",
+            "only the first original is kept"
+        );
+        let mut game = Game {
+            id: "pc:Game".into(),
+            title: "Game".into(),
+            platform: "PC".into(),
+            launch: Launch {
+                exe: "x.exe".into(),
+                args: vec![],
+            },
+            art: Art {
+                icon: Some("ICON0.PNG".into()),
+                ..Art::default()
+            },
+            xinput: true,
+            requires: vec![],
+            missing: None,
+            removable: false,
+        };
+        apply_art_folder(&mut game, &data.join("art"));
+        assert_eq!(game.art.icon, None, "None wins over the scanner's icon");
+        let _ = std::fs::remove_dir_all(&data);
     }
 
     #[test]

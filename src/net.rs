@@ -3,6 +3,7 @@
 
 use std::ffi::c_void;
 use std::ptr::{null, null_mut};
+use std::sync::OnceLock;
 
 use windows_sys::Win32::Foundation::GetLastError;
 use windows_sys::Win32::Networking::WinHttp::{
@@ -49,6 +50,31 @@ fn open(handle: *mut c_void, step: &str) -> Result<Handle, Error> {
     Ok(Handle(handle))
 }
 
+/// One session for the whole run: WinHTTP keeps connections to a server open inside a session,
+/// so the many small requests of an art search reuse one TLS connection instead of each
+/// paying for a new handshake. WinHTTP handles are safe to share between threads.
+fn session() -> Result<*mut c_void, Error> {
+    static SESSION: OnceLock<usize> = OnceLock::new();
+    let handle = *SESSION.get_or_init(|| unsafe {
+        let handle = WinHttpOpen(
+            wide("GameLauncher/0.2").as_ptr(),
+            WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY,
+            null(),
+            null(),
+            0,
+        );
+        if !handle.is_null() {
+            // Resolve, connect, send, receive (ms): a stalled server can't hang a worker.
+            WinHttpSetTimeouts(handle, 10_000, 10_000, 15_000, 20_000);
+        }
+        handle as usize
+    });
+    if handle == 0 {
+        return Err(Error::Failed("WinHttpOpen failed".into()));
+    }
+    Ok(handle as *mut c_void)
+}
+
 fn ok(result: i32, step: &str) -> Result<(), Error> {
     if result == 0 {
         let code = unsafe { GetLastError() };
@@ -66,21 +92,9 @@ pub fn get(url: &str) -> Result<Vec<u8>, Error> {
         None => (rest, "/".to_string()),
     };
     unsafe {
-        let session = open(
-            WinHttpOpen(
-                wide("GameLauncher/0.2").as_ptr(),
-                WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY,
-                null(),
-                null(),
-                0,
-            ),
-            "WinHttpOpen",
-        )?;
-        // Resolve, connect, send, receive (ms): a stalled server can't hang the art thread.
-        WinHttpSetTimeouts(session.0, 10_000, 10_000, 15_000, 20_000);
         let connection = open(
             WinHttpConnect(
-                session.0,
+                session()?,
                 wide(host).as_ptr(),
                 INTERNET_DEFAULT_HTTPS_PORT,
                 0,
@@ -178,6 +192,19 @@ mod tests {
     fn query_values_are_percent_encoded() {
         assert_eq!(encode("Dante's Inferno"), "Dante%27s%20Inferno");
         assert_eq!(encode("Ragnarök"), "Ragnar%C3%B6k");
+    }
+
+    /// `cargo test request_timing -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn request_timing() {
+        let url =
+            "https://shared.akamai.steamstatic.com/store_item_assets/steam/apps/1593500/logo.png";
+        let started = std::time::Instant::now();
+        for _ in 0..10 {
+            get(url).unwrap();
+        }
+        println!("10 requests: {:?}", started.elapsed());
     }
 
     #[test]
