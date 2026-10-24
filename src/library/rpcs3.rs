@@ -117,6 +117,8 @@ fn push_game(
             // so PS3 games show their title text unless the user supplies a logo.
             logo: None,
         },
+        // RPCS3 reads pads itself (Yvan configured his there).
+        xinput: false,
     });
 }
 

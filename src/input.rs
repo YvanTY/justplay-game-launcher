@@ -10,6 +10,7 @@ use sdl3_sys::everything::*;
 
 use crate::Action;
 use crate::diag;
+use crate::emulation::{self, VirtualPad};
 
 pub enum InputEvent {
     Action(Action),
@@ -20,6 +21,8 @@ pub enum InputEvent {
 
 /// Set while a game runs: the pads are then only watched for the home combo, so polling slows down.
 pub static IN_GAME: AtomicBool = AtomicBool::new(false);
+/// Set while a PC game that needs a virtual Xbox pad runs (the launcher translates the user's pad).
+pub static EMULATE: AtomicBool = AtomicBool::new(false);
 
 const POLL_INTERVAL: Duration = Duration::from_millis(8);
 const IN_GAME_POLL_INTERVAL: Duration = Duration::from_millis(33);
@@ -87,6 +90,10 @@ fn run(emit: impl Fn(InputEvent)) {
         gamepads: HashMap::new(),
         joysticks: HashMap::new(),
         combos: HashMap::new(),
+        emulator: None,
+        emulation_failed: false,
+        own_pads: HashSet::new(),
+        last_emulation_error: String::new(),
     };
     let mut event = SDL_Event::default();
     // SDL_WaitEvent re-polls open pads every ~1 ms, which costs real CPU with chatty
@@ -96,7 +103,10 @@ fn run(emit: impl Fn(InputEvent)) {
             pads.handle(&event);
         }
         pads.repeat_if_due();
-        let interval = if IN_GAME.load(Ordering::Relaxed) {
+        pads.update_emulation();
+        // Gameplay through the virtual pad needs full-rate polling; otherwise a game only
+        // needs the home combo watched.
+        let interval = if IN_GAME.load(Ordering::Relaxed) && pads.emulator.is_none() {
             IN_GAME_POLL_INTERVAL
         } else {
             POLL_INTERVAL
@@ -134,6 +144,13 @@ struct Pads<F: Fn(InputEvent)> {
     joysticks: HashMap<u32, *mut SDL_Joystick>,
     /// Per device: Select and Start held state, when both went down, and whether it already fired.
     combos: HashMap<u32, Combo>,
+    emulator: Option<VirtualPad>,
+    /// Set after a failed attempt so it isn't retried every poll; cleared when emulation stops.
+    emulation_failed: bool,
+    /// The launcher's own virtual pad as SDL sees it. Never opened, so its input is ignored
+    /// (otherwise every press, including the home combo, would arrive twice).
+    own_pads: HashSet<u32>,
+    last_emulation_error: String,
 }
 
 #[derive(Default)]
@@ -150,6 +167,14 @@ impl<F: Fn(InputEvent)> Pads<F> {
         match kind {
             SDL_EVENT_GAMEPAD_ADDED => {
                 let id = unsafe { event.gdevice.which };
+                if self.is_own_virtual_pad(id) {
+                    self.own_pads.insert(id.0);
+                    diag::log(&format!(
+                        "pad {} is the launcher's own virtual Xbox pad; ignored",
+                        id.0
+                    ));
+                    return;
+                }
                 let pad = unsafe { SDL_OpenGamepad(id) };
                 if pad.is_null() {
                     self.notice(format!(
@@ -166,11 +191,19 @@ impl<F: Fn(InputEvent)> Pads<F> {
                         cstr(mapping)
                     ));
                     unsafe { SDL_free(mapping.cast()) };
-                    self.notice(format!("{name} connected"));
+                    // Our virtual pad can be opened before its slot is known; claim_own_pad then
+                    // closes it, so don't announce Xbox pads appearing while emulation runs.
+                    let xbox = emulation::is_xbox(unsafe { SDL_GetGamepadType(pad) });
+                    if !(xbox && self.emulator.is_some()) {
+                        self.notice(format!("{name} connected"));
+                    }
                 }
             }
             SDL_EVENT_GAMEPAD_REMOVED => {
                 let id = unsafe { event.gdevice.which }.0;
+                if self.own_pads.remove(&id) {
+                    return;
+                }
                 if let Some(pad) = self.gamepads.remove(&id) {
                     unsafe { SDL_CloseGamepad(pad) };
                     self.forget_device(id);
@@ -381,6 +414,96 @@ impl<F: Fn(InputEvent)> Pads<F> {
             (_, Some(dir)) => self.press(source, dir),
             (_, None) => self.release(source),
         }
+    }
+
+    /// Keeps the virtual Xbox pad in step with EMULATE and feeds it the user's pad state.
+    fn update_emulation(&mut self) {
+        if !EMULATE.load(Ordering::Relaxed) {
+            if self.emulator.take().is_some() {
+                diag::log("virtual Xbox pad unplugged");
+            }
+            self.emulation_failed = false;
+            return;
+        }
+        // Only pads that aren't Xbox pads already need translating.
+        let source = self.source_pad();
+        if self.emulator.is_none() {
+            if self.emulation_failed || source.is_none() {
+                return;
+            }
+            match VirtualPad::connect() {
+                Ok(pad) => {
+                    self.emulator = Some(pad);
+                    diag::log("virtual Xbox pad plugged in");
+                }
+                Err(e) => {
+                    self.emulation_failed = true;
+                    diag::log(&format!("Xbox controller emulation unavailable: {e}"));
+                    self.notice(format!("Xbox controller emulation unavailable: {e}"));
+                    return;
+                }
+            }
+        }
+        self.claim_own_pad();
+        // A neutral pad while the launcher is on screen (so menu navigation doesn't also move
+        // things in the game) and when the user's pad disconnects (so nothing stays held).
+        let report = match source {
+            Some(source) if IN_GAME.load(Ordering::Relaxed) => emulation::report(
+                |button| unsafe { SDL_GetGamepadButton(source, button) },
+                |axis| unsafe { SDL_GetGamepadAxis(source, axis) },
+            ),
+            _ => emulation::report(|_| false, |_| 0),
+        };
+        if let Some(emulator) = self.emulator.as_mut()
+            && let Err(e) = emulator.send(report)
+            && e != self.last_emulation_error
+        {
+            diag::log(&e);
+            self.last_emulation_error = e;
+        }
+    }
+
+    /// Our virtual pad is the Xbox pad in the XInput slot ViGEm gave it.
+    fn is_own_virtual_pad(&mut self, id: SDL_JoystickID) -> bool {
+        let Some(slot) = self.emulator.as_mut().and_then(VirtualPad::xinput_slot) else {
+            return false;
+        };
+        emulation::is_xbox(unsafe { SDL_GetGamepadTypeForID(id) })
+            && unsafe { SDL_GetGamepadPlayerIndexForID(id) } == slot as i32
+    }
+
+    /// Closes our virtual pad if SDL reported it before its slot was known.
+    fn claim_own_pad(&mut self) {
+        let Some(slot) = self.emulator.as_mut().and_then(VirtualPad::xinput_slot) else {
+            return;
+        };
+        let own: Vec<u32> = self
+            .gamepads
+            .iter()
+            .filter(|&(_, &pad)| unsafe {
+                emulation::is_xbox(SDL_GetGamepadType(pad))
+                    && SDL_GetGamepadPlayerIndex(pad) == slot as i32
+            })
+            .map(|(&id, _)| id)
+            .collect();
+        for id in own {
+            if let Some(pad) = self.gamepads.remove(&id) {
+                unsafe { SDL_CloseGamepad(pad) };
+            }
+            self.forget_device(id);
+            self.own_pads.insert(id);
+            diag::log(&format!(
+                "pad {id} is the launcher's own virtual Xbox pad (slot {slot}); closed"
+            ));
+        }
+    }
+
+    fn source_pad(&self) -> Option<*mut SDL_Gamepad> {
+        self.gamepads
+            .iter()
+            .filter(|(id, _)| !self.own_pads.contains(id))
+            .map(|(_, &pad)| pad)
+            .find(|&pad| !emulation::is_xbox(unsafe { SDL_GetGamepadType(pad) }))
     }
 
     fn combo_button(&mut self, id: u32, is_start: bool, down: bool) {

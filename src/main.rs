@@ -3,6 +3,7 @@
 
 mod config;
 mod diag;
+mod emulation;
 mod home;
 mod input;
 mod launcher;
@@ -329,6 +330,8 @@ fn start_game(ui: &AppWindow, app: &mut App, game: usize) {
             .show(ui, format!("Close {title} first (⋯ → Close game)"));
         return;
     }
+    // Plugged in before the game starts so it finds the virtual pad when it enumerates pads.
+    input::EMULATE.store(app.home.games[game].xinput, Ordering::Relaxed);
     let weak = ui.as_weak();
     let started = launcher::start(&app.home.games[game].launch, move |ended| {
         let message = match ended {
@@ -359,7 +362,10 @@ fn start_game(ui: &AppWindow, app: &mut App, game: usize) {
             push_scalars(ui, &app.home);
             go_background(ui, app);
         }
-        Err(e) => app.toasts.show(ui, e),
+        Err(e) => {
+            input::EMULATE.store(false, Ordering::Relaxed);
+            app.toasts.show(ui, e);
+        }
     }
 }
 
@@ -411,6 +417,7 @@ fn game_ended(ui: &AppWindow, app: &mut App, message: &str) {
         .unwrap_or_default();
     app.running = None;
     app.home.running = None;
+    input::EMULATE.store(false, Ordering::Relaxed);
     // A sheet opened on the running game lists Resume / Close game, which no longer apply.
     app.home.sheet = None;
     if app.in_background {

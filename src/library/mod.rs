@@ -30,6 +30,8 @@ pub struct Game {
     pub platform: String,
     pub launch: Launch,
     pub art: Art,
+    /// Drive a virtual Xbox pad from the user's pad while this game runs.
+    pub xinput: bool,
 }
 
 pub struct Library {
@@ -87,6 +89,7 @@ fn pc_game(entry: &PcGame, warnings: &mut Vec<String>) -> Option<Game> {
             hero: entry.hero.clone(),
             logo: entry.logo.clone(),
         },
+        xinput: entry.xinput,
     })
 }
 

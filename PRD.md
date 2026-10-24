@@ -60,6 +60,7 @@ Keyboard fallback: arrows, Enter, Esc/Backspace, Space (game sheet), Tab / Shift
 | UI | Slint (GPU-rendered, declarative, redraws only on change) |
 | Controllers | SDL3 gamepad subsystem only (generic pad mapping database) |
 | Audio | kira (crossfades, UI sounds) |
+| Xbox pad emulation | vigem-client (pure Rust) talking to the ViGEmBus driver |
 | Storage | `config.toml` (user-edited) + `state.json` (favorites, last played), with no database |
 | Sounds | Synthesized in code, so no copyrighted assets |
 
@@ -72,6 +73,7 @@ Keyboard fallback: arrows, Enter, Esc/Backspace, Space (game sheet), Tab / Shift
 6. **Settings page (controller-driven):** master volume, music volume, UI sounds on/off and art dim level. Left/right change values. Saved immediately.
 7. **Per-game music:** `music/<game id>.ogg|mp3` fades in on focus.
 8. **Controller test page:** live inputs for each connected pad, to verify generic pads.
+9. **Automatic Xbox controller emulation (replaces x360ce):** while a PC game runs, the launcher plugs in a virtual Xbox 360 pad (ViGEmBus) and drives it from the user's pad, using SDL's mapping database, so no manual mapping is needed. On by default for PC games and off for emulators, which read pads directly; `xinput = false` turns it off per game. Pads that are already Xbox pads are never used as the source. The launcher ignores its own virtual pad, so presses never arrive twice. While the launcher is shown over the game, the game receives a neutral pad. *(Added after Yvan's request: his UCom pad is DirectInput-only and God of War is XInput-only.)*
 
 ## Not in v0.1
 Steam, Epic, GOG, Xbox/Game Pass, EA and Ubisoft libraries · online metadata or art scraping · video trailers · an in-game overlay · themes · adding games or editing rows from inside the app (v0.2) · installers or auto-update.

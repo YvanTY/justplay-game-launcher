@@ -65,6 +65,7 @@ pub fn scan(system: &SystemConfig, warnings: &mut Vec<String>) -> Vec<Game> {
                 args,
             },
             art,
+            xinput: system.xinput,
         });
     }
     games
@@ -151,6 +152,7 @@ mod tests {
             roms: roms.clone(),
             extensions: vec!["iso".into(), ".chd".into()],
             art: Some(root.join("art")),
+            xinput: false,
         };
         let mut games = scan(&system, &mut Vec::new());
         games.sort_by(|a, b| a.title.cmp(&b.title));
@@ -176,6 +178,7 @@ mod tests {
             roms: PathBuf::from(r"Z:\nope"),
             extensions: vec!["nsp".into()],
             art: None,
+            xinput: false,
         };
         let mut warnings = Vec::new();
         assert!(scan(&system, &mut warnings).is_empty());

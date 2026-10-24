@@ -385,6 +385,7 @@ mod tests {
                 args: vec![],
             },
             art: Art::default(),
+            xinput: false,
         }
     }
 

@@ -16,6 +16,10 @@ const DEFAULT_CONFIG: &str = r#"# Game Launcher settings. Paths use single quote
 # icon = 'C:\Art\gow-icon.png'   # optional square/portrait art
 # hero = 'C:\Art\gow-hero.jpg'   # optional full-screen background
 # logo = 'C:\Art\gow-logo.png'   # optional transparent logo
+# xinput = false                 # turn off the virtual Xbox pad for this game
+#
+# PC games get a virtual Xbox controller driven by your pad (like x360ce), so pads that
+# aren't Xbox pads work in Xbox-only games. Needs the ViGEmBus driver.
 #
 # Art can also be dropped into %APPDATA%\GameLauncher\art\<game title>\ as
 # icon.png|jpg, hero.png|jpg and logo.png — this works for every game.
@@ -34,6 +38,7 @@ const DEFAULT_CONFIG: &str = r#"# Game Launcher settings. Paths use single quote
 # roms = 'E:\Roms\PS2'
 # extensions = ["iso", "chd"]
 # art = 'E:\Roms\PS2\art'        # optional: <rom name>.png, <rom name>-hero.jpg, <rom name>-logo.png
+# xinput = true                  # only if this emulator needs an Xbox pad (most read your pad directly)
 #
 # [[systems]]
 # name = "Switch"
@@ -61,6 +66,8 @@ pub struct PcGame {
     pub icon: Option<PathBuf>,
     pub hero: Option<PathBuf>,
     pub logo: Option<PathBuf>,
+    #[serde(default = "enabled")]
+    pub xinput: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -83,6 +90,12 @@ pub struct SystemConfig {
     pub roms: PathBuf,
     pub extensions: Vec<String>,
     pub art: Option<PathBuf>,
+    #[serde(default)]
+    pub xinput: bool,
+}
+
+fn enabled() -> bool {
+    true
 }
 
 fn default_rpcs3_args() -> String {
@@ -150,6 +163,14 @@ mod tests {
             PathBuf::from(r"E:\Games\God of War\GoW.exe")
         );
         assert_eq!(config.games[0].args, "");
+        assert!(
+            config.games[0].xinput,
+            "PC games get the virtual Xbox pad by default"
+        );
+        assert!(
+            !config.systems[0].xinput,
+            "emulators read pads directly by default"
+        );
         let rpcs3 = config.rpcs3.unwrap();
         assert_eq!(rpcs3.hide, ["NPUO70219"]);
         assert_eq!(rpcs3.args, r#"--no-gui "{rom}""#);
