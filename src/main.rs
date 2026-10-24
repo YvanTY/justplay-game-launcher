@@ -48,7 +48,7 @@ struct App {
     /// True while the launcher is hidden behind a running game.
     in_background: bool,
     /// None when the PC has no usable audio output; the launcher works silently then.
-    audio: Option<Audio>,
+    audio: Option<Rc<Audio>>,
     audio_timer: Timer,
 }
 
@@ -91,7 +91,7 @@ fn main() -> Result<(), slint::PlatformError> {
         running: None,
         in_background: false,
         audio: match Audio::start() {
-            Ok(audio) => Some(audio),
+            Ok(audio) => Some(Rc::new(audio)),
             Err(e) => {
                 problems.push(format!("Sound is off: {e}"));
                 None
@@ -138,16 +138,10 @@ fn main() -> Result<(), slint::PlatformError> {
             let before = app.borrow().home.nav_state();
             let effects = app.borrow_mut().home.handle(action);
             let after = app.borrow().home.nav_state();
-            if let (Some(sound), Some(audio)) = (
-                sound_for(action, before, after, &effects),
-                &app.borrow().audio,
-            ) {
-                audio.play(sound);
+            if let Some(sound) = sound_for(action, before, after, &effects) {
+                play_sound(&app.borrow(), sound);
             }
             apply_effects(&ui, &app, &effects);
-            if app.borrow().in_background {
-                pause_audio_soon(&ui, &app);
-            }
         }
     });
     ui.on_notify({
@@ -161,13 +155,7 @@ fn main() -> Result<(), slint::PlatformError> {
     ui.on_home_combo({
         let weak = ui.as_weak();
         let app = app.clone();
-        move || {
-            let ui = weak.unwrap();
-            home_combo(&ui, &mut app.borrow_mut());
-            if app.borrow().in_background {
-                pause_audio_soon(&ui, &app);
-            }
-        }
+        move || home_combo(&weak.unwrap(), &mut app.borrow_mut())
     });
     ui.on_game_ended({
         let weak = ui.as_weak();
@@ -533,9 +521,6 @@ fn sound_for(
 
 fn go_background(ui: &AppWindow, app: &mut App) {
     app.in_background = true;
-    if let Some(audio) = &app.audio {
-        audio.set_ambient(false);
-    }
     input::IN_GAME.store(true, Ordering::Relaxed);
     app.hero_timer.stop();
     if let Err(e) = ui.hide() {
@@ -549,35 +534,21 @@ fn go_background(ui: &AppWindow, app: &mut App) {
     launcher::trim_memory();
 }
 
-/// Stops the audio device once the launch sound has finished, unless the launcher came back meanwhile.
-fn pause_audio_soon(ui: &AppWindow, app_rc: &Rc<RefCell<App>>) {
-    let weak = ui.as_weak();
-    let app = app_rc.clone();
-    app_rc.borrow().audio_timer.start(
-        TimerMode::SingleShot,
-        Duration::from_millis(1300),
-        move || {
-            if weak.upgrade().is_none() {
-                return;
-            }
-            let app = app.borrow();
-            if app.in_background
-                && let Some(audio) = &app.audio
-            {
-                audio.pause();
-            }
-        },
-    );
+/// Plays a UI sound; the audio device pauses again shortly after, so silence costs no CPU.
+fn play_sound(app: &App, sound: Sound) {
+    let Some(audio) = &app.audio else { return };
+    audio.play(sound);
+    let audio = audio.clone();
+    // The longest sound (the launch whoosh) lasts 0.8 s.
+    app.audio_timer
+        .start(TimerMode::SingleShot, Duration::from_secs(1), move || {
+            audio.pause_if_idle()
+        });
 }
 
 fn come_back(ui: &AppWindow, app: &mut App) {
     app.in_background = false;
-    app.audio_timer.stop();
-    if let Some(audio) = &app.audio {
-        audio.resume();
-        audio.set_ambient(true);
-        audio.play(Sound::Confirm);
-    }
+    play_sound(app, Sound::Confirm);
     input::IN_GAME.store(false, Ordering::Relaxed);
     if let Err(e) = ui.show() {
         app.toasts
