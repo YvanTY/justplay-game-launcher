@@ -59,7 +59,7 @@ Keyboard fallback: arrows, Enter, Esc/Backspace, Space (game sheet), Tab / Shift
 | Language | Rust (stable, MSVC toolchain) |
 | UI | Slint (GPU-rendered, declarative, redraws only on change) |
 | Controllers | SDL3 gamepad subsystem only (generic pad mapping database) |
-| Audio | kira (crossfades, UI sounds) |
+| Audio | SDL3 audio stream + a small built-in mixer (replaced kira: the device can be fully paused, so no audio CPU during games) |
 | Xbox pad emulation | vigem-client (pure Rust) talking to the ViGEmBus driver |
 | Storage | `config.toml` (user-edited) + `state.json` (favorites, last played), with no database |
 | Sounds | Synthesized in code, so no copyrighted assets |

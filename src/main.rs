@@ -1,6 +1,7 @@
 // Release builds run without a console window; debug builds keep it for logs.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod audio;
 mod config;
 mod diag;
 mod emulation;
@@ -20,11 +21,13 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use slint::{Color, Image, ModelRc, SharedString, Timer, TimerMode, VecModel};
 
-use home::{Effect, Home, SheetItem};
+use audio::{Audio, Sound};
+use emulation::Translate;
+use home::{Effect, Home, NavState, SheetItem};
 use input::InputEvent;
 use launcher::{Ended, Running};
 use library::{Game, Library};
-use state::State;
+use state::{ControllerMode, State};
 
 slint::include_modules!();
 
@@ -44,6 +47,9 @@ struct App {
     running: Option<Running>,
     /// True while the launcher is hidden behind a running game.
     in_background: bool,
+    /// None when the PC has no usable audio output; the launcher works silently then.
+    audio: Option<Audio>,
+    audio_timer: Timer,
 }
 
 fn main() -> Result<(), slint::PlatformError> {
@@ -84,6 +90,14 @@ fn main() -> Result<(), slint::PlatformError> {
         clock_timer: Timer::default(),
         running: None,
         in_background: false,
+        audio: match Audio::start() {
+            Ok(audio) => Some(audio),
+            Err(e) => {
+                problems.push(format!("Sound is off: {e}"));
+                None
+            }
+        },
+        audio_timer: Timer::default(),
     }));
 
     {
@@ -121,8 +135,19 @@ fn main() -> Result<(), slint::PlatformError> {
                 toasts.show(&ui, "The quick panel arrives in step 6".into());
                 return;
             }
+            let before = app.borrow().home.nav_state();
             let effects = app.borrow_mut().home.handle(action);
+            let after = app.borrow().home.nav_state();
+            if let (Some(sound), Some(audio)) = (
+                sound_for(action, before, after, &effects),
+                &app.borrow().audio,
+            ) {
+                audio.play(sound);
+            }
             apply_effects(&ui, &app, &effects);
+            if app.borrow().in_background {
+                pause_audio_soon(&ui, &app);
+            }
         }
     });
     ui.on_notify({
@@ -136,7 +161,13 @@ fn main() -> Result<(), slint::PlatformError> {
     ui.on_home_combo({
         let weak = ui.as_weak();
         let app = app.clone();
-        move || home_combo(&weak.unwrap(), &mut app.borrow_mut())
+        move || {
+            let ui = weak.unwrap();
+            home_combo(&ui, &mut app.borrow_mut());
+            if app.borrow().in_background {
+                pause_audio_soon(&ui, &app);
+            }
+        }
     });
     ui.on_game_ended({
         let weak = ui.as_weak();
@@ -176,6 +207,11 @@ fn apply_effects(ui: &AppWindow, app_rc: &Rc<RefCell<App>>, effects: &[Effect]) 
             Effect::Selection => push_selection(ui, &mut app),
             Effect::Launch(game) => start_game(ui, &mut app, *game),
             Effect::Resume => resume_game(ui, &mut app),
+            Effect::ControllerMode(game) => {
+                if app.home.running == Some(*game) {
+                    input::set_translation(translation_for(&app.home, *game));
+                }
+            }
             Effect::CloseGame => {
                 // The watcher notices the processes ending and brings the launcher back.
                 if let Some(running) = &app.running {
@@ -281,6 +317,13 @@ fn push_scalars(ui: &AppWindow, home: &Home) {
                 SheetItem::Play => "Play".into(),
                 SheetItem::Resume => "Resume".into(),
                 SheetItem::CloseGame => "Close game".into(),
+                SheetItem::ControllerMode => match home.controller_mode(sheet.game) {
+                    ControllerMode::Xbox => "Controller: Xbox for every pad".into(),
+                    ControllerMode::PlaystationNative => {
+                        "Controller: PlayStation pads native".into()
+                    }
+                    ControllerMode::Off => "Controller: game reads pads itself".into(),
+                },
                 SheetItem::ToggleFavorite if home.is_favorite(sheet.game) => {
                     "Remove from Favorites".into()
                 }
@@ -331,7 +374,7 @@ fn start_game(ui: &AppWindow, app: &mut App, game: usize) {
         return;
     }
     // Plugged in before the game starts so it finds the virtual pad when it enumerates pads.
-    input::EMULATE.store(app.home.games[game].xinput, Ordering::Relaxed);
+    input::set_translation(translation_for(&app.home, game));
     let weak = ui.as_weak();
     let started = launcher::start(&app.home.games[game].launch, move |ended| {
         let message = match ended {
@@ -363,9 +406,17 @@ fn start_game(ui: &AppWindow, app: &mut App, game: usize) {
             go_background(ui, app);
         }
         Err(e) => {
-            input::EMULATE.store(false, Ordering::Relaxed);
+            input::set_translation(Translate::Off);
             app.toasts.show(ui, e);
         }
+    }
+}
+
+fn translation_for(home: &Home, game: usize) -> Translate {
+    match home.controller_mode(game) {
+        ControllerMode::Xbox => Translate::AllPads,
+        ControllerMode::PlaystationNative => Translate::ExceptPlayStation,
+        ControllerMode::Off => Translate::Off,
     }
 }
 
@@ -417,7 +468,7 @@ fn game_ended(ui: &AppWindow, app: &mut App, message: &str) {
         .unwrap_or_default();
     app.running = None;
     app.home.running = None;
-    input::EMULATE.store(false, Ordering::Relaxed);
+    input::set_translation(Translate::Off);
     // A sheet opened on the running game lists Resume / Close game, which no longer apply.
     app.home.sheet = None;
     if app.in_background {
@@ -432,8 +483,59 @@ fn game_ended(ui: &AppWindow, app: &mut App, message: &str) {
 }
 
 /// Gets out of the game's way: hidden window, full-screen art released, slow pad polling.
+/// Feedback sound for a key press, from what it changed on screen.
+fn sound_for(
+    action: Action,
+    before: NavState,
+    after: NavState,
+    effects: &[Effect],
+) -> Option<Sound> {
+    if effects.iter().any(|e| matches!(e, Effect::Launch(_))) {
+        return Some(Sound::Launch);
+    }
+    if effects.iter().any(|e| {
+        matches!(
+            e,
+            Effect::Resume | Effect::CloseGame | Effect::ControllerMode(_)
+        )
+    }) {
+        return Some(Sound::Confirm);
+    }
+    match (before.sheet_open, after.sheet_open) {
+        (false, true) => return Some(Sound::Confirm),
+        (true, false) if matches!(action, Action::Back | Action::Options) => {
+            return Some(Sound::Back);
+        }
+        (true, false) => return Some(Sound::Confirm),
+        _ => {}
+    }
+    if before.tab != after.tab {
+        return Some(Sound::Tab);
+    }
+    if before != after {
+        return Some(if action == Action::Back {
+            Sound::Back
+        } else {
+            Sound::Move
+        });
+    }
+    let navigation = matches!(
+        action,
+        Action::Up
+            | Action::Down
+            | Action::Left
+            | Action::Right
+            | Action::PagePrev
+            | Action::PageNext
+    );
+    navigation.then_some(Sound::Bump)
+}
+
 fn go_background(ui: &AppWindow, app: &mut App) {
     app.in_background = true;
+    if let Some(audio) = &app.audio {
+        audio.set_ambient(false);
+    }
     input::IN_GAME.store(true, Ordering::Relaxed);
     app.hero_timer.stop();
     if let Err(e) = ui.hide() {
@@ -447,8 +549,35 @@ fn go_background(ui: &AppWindow, app: &mut App) {
     launcher::trim_memory();
 }
 
+/// Stops the audio device once the launch sound has finished, unless the launcher came back meanwhile.
+fn pause_audio_soon(ui: &AppWindow, app_rc: &Rc<RefCell<App>>) {
+    let weak = ui.as_weak();
+    let app = app_rc.clone();
+    app_rc.borrow().audio_timer.start(
+        TimerMode::SingleShot,
+        Duration::from_millis(1300),
+        move || {
+            if weak.upgrade().is_none() {
+                return;
+            }
+            let app = app.borrow();
+            if app.in_background
+                && let Some(audio) = &app.audio
+            {
+                audio.pause();
+            }
+        },
+    );
+}
+
 fn come_back(ui: &AppWindow, app: &mut App) {
     app.in_background = false;
+    app.audio_timer.stop();
+    if let Some(audio) = &app.audio {
+        audio.resume();
+        audio.set_ambient(true);
+        audio.play(Sound::Confirm);
+    }
     input::IN_GAME.store(false, Ordering::Relaxed);
     if let Err(e) = ui.show() {
         app.toasts
@@ -674,6 +803,52 @@ mod tests {
         assert_eq!(played_ago(3 * 3600), "Played 3 h ago");
         assert_eq!(played_ago(30 * 3600), "Played yesterday");
         assert_eq!(played_ago(5 * 86400), "Played 5 days ago");
+    }
+
+    fn nav(focus: usize) -> NavState {
+        NavState {
+            tab: 0,
+            focus,
+            zone: Zone::Icons,
+            action: 0,
+            recent_focus: 0,
+            sheet_open: false,
+            sheet_focus: 0,
+        }
+    }
+
+    #[test]
+    fn sounds_follow_what_changed() {
+        let moved = sound_for(Action::Right, nav(0), nav(1), &[Effect::Selection]);
+        assert_eq!(moved, Some(Sound::Move));
+        // Pressing right on the last game changes nothing: a bump, not silence.
+        assert_eq!(
+            sound_for(Action::Right, nav(3), nav(3), &[]),
+            Some(Sound::Bump)
+        );
+        let tab = NavState { tab: 1, ..nav(0) };
+        assert_eq!(
+            sound_for(Action::TabNext, nav(0), tab, &[Effect::Tabs]),
+            Some(Sound::Tab)
+        );
+        assert_eq!(
+            sound_for(Action::Confirm, nav(0), nav(0), &[Effect::Launch(0)]),
+            Some(Sound::Launch)
+        );
+        let open = NavState {
+            sheet_open: true,
+            ..nav(0)
+        };
+        assert_eq!(
+            sound_for(Action::Options, nav(0), open, &[]),
+            Some(Sound::Confirm)
+        );
+        assert_eq!(
+            sound_for(Action::Back, open, nav(0), &[]),
+            Some(Sound::Back)
+        );
+        // Confirm with nothing to do (e.g. empty tab) stays silent.
+        assert_eq!(sound_for(Action::Confirm, nav(0), nav(0), &[]), None);
     }
 
     #[test]

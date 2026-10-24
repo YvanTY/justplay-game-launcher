@@ -6,7 +6,7 @@ use std::collections::HashMap;
 
 use crate::library::Game;
 use crate::nav;
-use crate::state::State;
+use crate::state::{ControllerMode, State};
 use crate::{Action, Zone};
 
 /// Games skipped by LT / RT.
@@ -26,6 +26,7 @@ pub enum SheetItem {
     Play,
     Resume,
     CloseGame,
+    ControllerMode,
     ToggleFavorite,
 }
 
@@ -45,6 +46,21 @@ pub enum Effect {
     /// Bring the running game back to the front.
     Resume,
     CloseGame,
+    /// The game's controller mode changed (applied at once if it is running).
+    ControllerMode(usize),
+}
+
+/// Everything a key press can change, compared before/after to pick a feedback sound.
+/// (PartialEq only: the Slint-generated Zone doesn't implement Eq.)
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct NavState {
+    pub tab: usize,
+    pub focus: usize,
+    pub zone: Zone,
+    pub action: usize,
+    pub recent_focus: usize,
+    pub sheet_open: bool,
+    pub sheet_focus: usize,
 }
 
 pub struct Home {
@@ -80,6 +96,18 @@ impl Home {
         home
     }
 
+    pub fn nav_state(&self) -> NavState {
+        NavState {
+            tab: self.current,
+            focus: self.tab().focus,
+            zone: self.zone,
+            action: self.action,
+            recent_focus: self.recent_focus,
+            sheet_open: self.sheet.is_some(),
+            sheet_focus: self.sheet.as_ref().map_or(0, |s| s.focus),
+        }
+    }
+
     pub fn tab(&self) -> &Tab {
         &self.tabs[self.current]
     }
@@ -90,16 +118,31 @@ impl Home {
     }
 
     pub fn sheet_items(&self) -> Vec<SheetItem> {
-        let game = self.sheet.as_ref().map(|s| s.game);
-        if game.is_some() && game == self.running {
-            vec![
-                SheetItem::Resume,
-                SheetItem::CloseGame,
-                SheetItem::ToggleFavorite,
-            ]
+        let Some(game) = self.sheet.as_ref().map(|s| s.game) else {
+            return Vec::new();
+        };
+        let mut items = if Some(game) == self.running {
+            vec![SheetItem::Resume, SheetItem::CloseGame]
         } else {
-            vec![SheetItem::Play, SheetItem::ToggleFavorite]
+            vec![SheetItem::Play]
+        };
+        if self.games[game].xinput {
+            items.push(SheetItem::ControllerMode);
         }
+        items.push(SheetItem::ToggleFavorite);
+        items
+    }
+
+    /// Games whose config disables translation (emulators) are always Off.
+    pub fn controller_mode(&self, game: usize) -> ControllerMode {
+        if !self.games[game].xinput {
+            return ControllerMode::Off;
+        }
+        self.state
+            .controller_modes
+            .get(&self.games[game].id)
+            .copied()
+            .unwrap_or_default()
     }
 
     /// Playing the game that is already running just brings it back.
@@ -255,11 +298,19 @@ impl Home {
                 let game = sheet.game;
                 // The item list can shrink under an open sheet (the game exits), so clamp.
                 let item = items[sheet.focus.min(items.len() - 1)];
+                if item == SheetItem::ControllerMode {
+                    // Cycles in place so the new mode is visible on the same line.
+                    let next = self.controller_mode(game).next();
+                    let id = self.games[game].id.clone();
+                    self.state.controller_modes.insert(id, next);
+                    return vec![Effect::SaveState, Effect::ControllerMode(game)];
+                }
                 self.sheet = None;
                 return match item {
                     SheetItem::Play => vec![Effect::Launch(game)],
                     SheetItem::Resume => vec![Effect::Resume],
                     SheetItem::CloseGame => vec![Effect::CloseGame],
+                    SheetItem::ControllerMode => unreachable!("handled above"),
                     SheetItem::ToggleFavorite => {
                         let id = self.games[game].id.clone();
                         self.state.toggle_favorite(&id);
@@ -535,6 +586,35 @@ mod tests {
         home.open_close_menu();
         assert_eq!(home.current, 0);
         assert_eq!(home.selected_game(), Some(0));
+    }
+
+    #[test]
+    fn controller_mode_cycles_in_the_sheet_for_pc_games_only() {
+        let mut games = sample();
+        games[1].xinput = true; // a PC game
+        let mut home = Home::new(games, State::default());
+        home.handle(Action::Right); // God of War
+        home.handle(Action::Options);
+        assert_eq!(
+            home.sheet_items(),
+            [
+                SheetItem::Play,
+                SheetItem::ControllerMode,
+                SheetItem::ToggleFavorite
+            ]
+        );
+        home.handle(Action::Down);
+        assert_eq!(
+            home.handle(Action::Confirm),
+            [Effect::SaveState, Effect::ControllerMode(1)]
+        );
+        assert!(
+            home.sheet.is_some(),
+            "sheet stays open to show the new mode"
+        );
+        assert_eq!(home.controller_mode(1), ControllerMode::PlaystationNative);
+        // A PS3 game (translation disabled in config) has no controller line and is always Off.
+        assert_eq!(home.controller_mode(0), ControllerMode::Off);
     }
 
     #[test]

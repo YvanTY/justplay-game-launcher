@@ -12,6 +12,31 @@ pub struct State {
     pub favorites: BTreeSet<String>,
     /// Game id -> Unix seconds of the last launch.
     pub last_played: HashMap<String, u64>,
+    /// Per-game controller translation chosen in the game's menu (absent = default).
+    pub controller_modes: HashMap<String, ControllerMode>,
+}
+
+/// How a PC game receives pads that aren't Xbox pads.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ControllerMode {
+    /// Every non-Xbox pad gets a virtual Xbox twin.
+    #[default]
+    Xbox,
+    /// PlayStation pads are left for the game to read natively; other pads are translated.
+    PlaystationNative,
+    /// No translation; the game reads pads itself.
+    Off,
+}
+
+impl ControllerMode {
+    pub fn next(self) -> ControllerMode {
+        match self {
+            ControllerMode::Xbox => ControllerMode::PlaystationNative,
+            ControllerMode::PlaystationNative => ControllerMode::Off,
+            ControllerMode::Off => ControllerMode::Xbox,
+        }
+    }
 }
 
 impl State {
@@ -118,6 +143,22 @@ mod tests {
         let (state, problem) = State::load(&path);
         assert!(problem.is_none(), "{problem:?}");
         assert!(state.favorites.contains("pc:X"));
+    }
+
+    #[test]
+    fn controller_modes_round_trip_and_cycle() {
+        let path = temp_path("modes");
+        let mut state = State::default();
+        state
+            .controller_modes
+            .insert("pc:God of War".into(), ControllerMode::PlaystationNative);
+        state.save(&path).unwrap();
+        let (loaded, _) = State::load(&path);
+        assert_eq!(
+            loaded.controller_modes["pc:God of War"],
+            ControllerMode::PlaystationNative
+        );
+        assert_eq!(ControllerMode::Off.next(), ControllerMode::Xbox);
     }
 
     #[test]

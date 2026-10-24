@@ -125,6 +125,30 @@ pub fn is_xbox(kind: SDL_GamepadType) -> bool {
     kind == SDL_GAMEPAD_TYPE_XBOX360 || kind == SDL_GAMEPAD_TYPE_XBOXONE
 }
 
+fn is_playstation(kind: SDL_GamepadType) -> bool {
+    kind == SDL_GAMEPAD_TYPE_PS3 || kind == SDL_GAMEPAD_TYPE_PS4 || kind == SDL_GAMEPAD_TYPE_PS5
+}
+
+/// Which pads get a virtual Xbox twin while a game runs.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Translate {
+    Off = 0,
+    /// Every pad that isn't already an Xbox pad.
+    AllPads = 1,
+    /// Leave PS3/PS4/PS5 pads alone for games that support them natively.
+    ExceptPlayStation = 2,
+}
+
+pub fn should_translate(kind: SDL_GamepadType, mode: Translate) -> bool {
+    match mode {
+        Translate::Off => false,
+        // Games read Xbox pads directly, so translating them would only duplicate them.
+        _ if is_xbox(kind) => false,
+        Translate::AllPads => true,
+        Translate::ExceptPlayStation => !is_playstation(kind),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -164,6 +188,23 @@ mod tests {
     fn resting_stick_stays_near_center() {
         assert_eq!(flip(0), -1);
         assert_eq!(trigger(-5), 0);
+    }
+
+    #[test]
+    fn translation_rules_by_pad_type_and_mode() {
+        use Translate::*;
+        // Xbox pads are never translated.
+        assert!(!should_translate(SDL_GAMEPAD_TYPE_XBOXONE, AllPads));
+        // Generic pads (like the UCom) are translated unless translation is off.
+        assert!(should_translate(SDL_GAMEPAD_TYPE_STANDARD, AllPads));
+        assert!(should_translate(
+            SDL_GAMEPAD_TYPE_STANDARD,
+            ExceptPlayStation
+        ));
+        assert!(!should_translate(SDL_GAMEPAD_TYPE_STANDARD, Off));
+        // PlayStation pads only when the game doesn't support them natively.
+        assert!(should_translate(SDL_GAMEPAD_TYPE_PS5, AllPads));
+        assert!(!should_translate(SDL_GAMEPAD_TYPE_PS4, ExceptPlayStation));
     }
 
     #[test]
