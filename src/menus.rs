@@ -56,9 +56,16 @@ pub const POWER: [PowerItem; 4] = [
 pub enum Setting {
     SoundVolume,
     MusicVolume,
+    LauncherScreen,
+    GameScreen,
 }
 
-pub const SETTINGS: [Setting; 2] = [Setting::SoundVolume, Setting::MusicVolume];
+pub const SETTINGS: [Setting; 4] = [
+    Setting::SoundVolume,
+    Setting::MusicVolume,
+    Setting::LauncherScreen,
+    Setting::GameScreen,
+];
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum MenuEffect {

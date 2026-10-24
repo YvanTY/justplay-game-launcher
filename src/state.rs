@@ -25,6 +25,12 @@ pub struct State {
     pub scan_place: Option<PathBuf>,
     /// Folders chosen to look in, most recent first, offered again as one-press places.
     pub scan_folders: Vec<PathBuf>,
+    /// Where the launcher, and games, are shown (Settings).
+    pub launcher_screen: crate::display::ScreenChoice,
+    pub game_screen: crate::display::ScreenChoice,
+    /// The screen layout the user had before the launcher changed it. Restored when the
+    /// launcher closes, or at its next start if it was closed some other way.
+    pub display_restore: Option<crate::display::Layout>,
     /// Game id -> Steam app id its art came from (None: no Steam app). Looked up once.
     pub art_lookups: HashMap<String, Option<u32>>,
     /// Version of the art lookup that filled `art_lookups`; a newer lookup retries the misses.

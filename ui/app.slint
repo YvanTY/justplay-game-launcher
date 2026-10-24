@@ -1098,13 +1098,13 @@ export component AppWindow inherits Window {
     }
 
     if overlay == 3: Rectangle {
-        property <[string]> labels: ["UI sounds volume", "Music volume"];
+        property <[string]> labels: ["UI sounds volume", "Music volume", "Launcher screen", "Games play on"];
         Hit { }
 
         x: (root.width - self.width) / 2;
         y: (root.height - self.height) / 2;
-        width: 900 * u;
-        height: 460 * u;
+        width: 1100 * u;
+        height: 650 * u;
         border-radius: 24 * u;
         background: #0f1522f7;
         border-width: 1px;
@@ -1142,7 +1142,7 @@ export component AppWindow inherits Window {
 
             // Fixed width so the arrows hug the value at the right end of the row.
             HorizontalLayout {
-                width: 200 * u;
+                width: 460 * u;
                 x: parent.width - self.width - 28 * u;
                 height: parent.height;
                 spacing: 18 * u;
@@ -1155,7 +1155,8 @@ export component AppWindow inherits Window {
 
                 Text {
                     text: settings-values[i];
-                    min-width: 90 * u;
+                    width: 380 * u;
+                    overflow: elide;
                     font-size: 28 * u;
                     font-weight: 600;
                     color: i == settings-index ? white : #ffffffa6;
@@ -1172,7 +1173,7 @@ export component AppWindow inherits Window {
 
             // The arrows step the value, like Left / Right.
             Hit {
-                x: parent.width - 238 * u;
+                x: parent.width - 498 * u;
                 width: 70 * u;
                 target: Target.settings-step;
                 a: i;

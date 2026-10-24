@@ -8,6 +8,7 @@ mod background;
 mod config;
 mod controllers;
 mod diag;
+mod display;
 mod emulation;
 mod home;
 mod input;
@@ -413,7 +414,22 @@ fn main() -> Result<(), slint::PlatformError> {
     });
     ui.window().set_fullscreen(true);
     ui.show()?;
-    slint::run_event_loop_until_quit()
+    // Once the window exists: undo a layout left by a launcher that didn't close normally, then
+    // put the launcher on its screen.
+    slint::Timer::single_shot(Duration::ZERO, {
+        let weak = ui.as_weak();
+        let app = app.clone();
+        move || {
+            if let Some(ui) = weak.upgrade() {
+                let mut app = app.borrow_mut();
+                restore_screens(&mut app);
+                show_launcher_on_its_screen(&ui, &mut app);
+            }
+        }
+    });
+    let result = slint::run_event_loop_until_quit();
+    restore_screens(&mut app.borrow_mut());
+    result
 }
 
 /// While a game has the screen, or in the second after the launcher appears, input is ignored
@@ -1165,6 +1181,9 @@ fn start_game(ui: &AppWindow, app: &mut App, game: usize) {
     }
     // Plugged in before the game starts so it finds the virtual pad when it enumerates pads.
     input::set_translation(translation_for(&app.home, game));
+    // Games open on the main display: switch first if they belong on another screen.
+    let game_screen = app.home.state.game_screen.clone();
+    use_screen_layout(ui, app, &game_screen, true);
     let weak = ui.as_weak();
     let started = launcher::start(&app.home.games[game].launch, move |ended| {
         let message = match ended {
@@ -1197,8 +1216,84 @@ fn start_game(ui: &AppWindow, app: &mut App, game: usize) {
         }
         Err(e) => {
             input::set_translation(Translate::Off);
+            show_launcher_on_its_screen(ui, app);
             app.toasts.show(ui, e);
         }
+    }
+}
+
+/// Switches Windows to the layout `choice` needs (for a game, or for the launcher), first
+/// remembering the user's own layout so it can be put back.
+fn use_screen_layout(
+    ui: &AppWindow,
+    app: &mut App,
+    choice: &display::ScreenChoice,
+    for_game: bool,
+) {
+    let screens = display::screens();
+    let state = &mut app.home.state;
+    if screens.len() < 2 && state.display_restore.is_none() {
+        return;
+    }
+    let original = state
+        .display_restore
+        .clone()
+        .unwrap_or_else(|| display::current(&screens));
+    let wanted = display::wanted(choice, &original, for_game);
+    if wanted != display::current(&screens) {
+        if state.display_restore.is_none() {
+            state.display_restore = Some(original.clone());
+            if let Err(e) = state.save(&app.state_path) {
+                diag::log(&e);
+            }
+        }
+        if let Err(e) = display::apply(&wanted) {
+            diag::log(&e);
+            app.toasts.show(ui, e);
+            return;
+        }
+    }
+    let state = &mut app.home.state;
+    if wanted == original && state.display_restore.take().is_some() {
+        if let Err(e) = state.save(&app.state_path) {
+            diag::log(&e);
+        }
+    }
+}
+
+/// The launcher's screen: Windows' layout for it, then its window on the chosen screen.
+fn show_launcher_on_its_screen(ui: &AppWindow, app: &mut App) {
+    let choice = app.home.state.launcher_screen.clone();
+    use_screen_layout(ui, app, &choice, false);
+    let screens = display::screens();
+    if screens.len() < 2 {
+        return;
+    }
+    let target = match &choice {
+        display::ScreenChoice::Screen(device) => screens.iter().find(|s| s.device == *device),
+        _ => None,
+    }
+    .or_else(|| screens.iter().find(|s| s.primary))
+    .or(screens.first());
+    if let Some(screen) = target {
+        // Full screen covers the screen the window is on, so move it there first.
+        let window = ui.window();
+        window.set_fullscreen(false);
+        window.set_position(slint::PhysicalPosition::new(screen.x, screen.y));
+        window.set_fullscreen(true);
+    }
+}
+
+/// Puts back the screen layout the user had (on exit, or at start after a crash).
+fn restore_screens(app: &mut App) {
+    let Some(original) = app.home.state.display_restore.take() else {
+        return;
+    };
+    if let Err(e) = display::apply(&original) {
+        diag::log(&format!("could not restore the screen layout: {e}"));
+    }
+    if let Err(e) = app.home.state.save(&app.state_path) {
+        diag::log(&e);
     }
 }
 
@@ -1394,6 +1489,7 @@ fn come_back(ui: &AppWindow, app: &mut App) {
         return;
     }
     ui.window().set_fullscreen(true);
+    show_launcher_on_its_screen(ui, app);
     match window_handle(ui) {
         Some(hwnd) => {
             let in_front = launcher::bring_to_front(hwnd);
@@ -1606,6 +1702,18 @@ fn handle_menu_action(ui: &AppWindow, app: &mut App, action: Action) {
                     }
                     Setting::MusicVolume => {
                         settings.music_volume = state::Settings::step(settings.music_volume, delta)
+                    }
+                    Setting::LauncherScreen => {
+                        let screens = display::screens();
+                        let state = &mut app.home.state;
+                        state.launcher_screen =
+                            display::step(&state.launcher_screen, &screens, delta);
+                        show_launcher_on_its_screen(ui, app);
+                    }
+                    Setting::GameScreen => {
+                        let screens = display::screens();
+                        let state = &mut app.home.state;
+                        state.game_screen = display::step(&state.game_screen, &screens, delta);
                     }
                 }
                 apply_volumes(app);
@@ -2510,11 +2618,21 @@ fn push_menus(ui: &AppWindow, app: &App) {
     ui.set_power_index(menus.power_focus as i32);
     ui.set_settings_index(menus.settings_focus as i32);
     let settings = app.home.state.settings;
+    // Listing screens costs a few system calls: only while Settings is open.
+    let screens = if menus.overlay == Overlay::Settings {
+        display::screens()
+    } else {
+        Vec::new()
+    };
     let values: Vec<SharedString> = menus::SETTINGS
         .iter()
         .map(|setting| match setting {
             Setting::SoundVolume => format!("{}%", settings.sound_volume).into(),
             Setting::MusicVolume => format!("{}%", settings.music_volume).into(),
+            Setting::LauncherScreen => {
+                display::describe(&app.home.state.launcher_screen, &screens).into()
+            }
+            Setting::GameScreen => display::describe(&app.home.state.game_screen, &screens).into(),
         })
         .collect();
     ui.set_settings_values(ModelRc::new(VecModel::from(values)));
