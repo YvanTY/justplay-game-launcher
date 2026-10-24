@@ -21,8 +21,8 @@ use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
     KEYEVENTF_EXTENDEDKEY, KEYEVENTF_KEYUP, VK_MENU, keybd_event,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    EnumWindows, GetWindowRect, GetWindowThreadProcessId, IsIconic, IsWindowVisible, SW_RESTORE,
-    SW_SHOW, SetForegroundWindow, ShowWindow,
+    EnumWindows, GetForegroundWindow, GetWindowRect, GetWindowThreadProcessId, IsIconic,
+    IsWindowVisible, SW_RESTORE, SW_SHOW, SetForegroundWindow, ShowWindow,
 };
 use windows_sys::core::BOOL;
 
@@ -173,7 +173,8 @@ pub fn game_window(running: &Running) -> Option<HWND> {
     search.best.map(|(hwnd, _)| hwnd)
 }
 
-pub fn bring_to_front(hwnd: HWND) {
+/// Returns whether Windows actually made `hwnd` the foreground window.
+pub fn bring_to_front(hwnd: HWND) -> bool {
     unsafe {
         // Windows only lets a background process take focus right after it received input;
         // a synthetic Alt tap counts, which is the standard workaround launchers use.
@@ -189,6 +190,7 @@ pub fn bring_to_front(hwnd: HWND) {
             },
         );
         SetForegroundWindow(hwnd);
+        GetForegroundWindow() == hwnd
     }
 }
 

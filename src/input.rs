@@ -9,6 +9,7 @@ use std::time::{Duration, Instant};
 use sdl3_sys::everything::*;
 
 use crate::Action;
+use crate::diag;
 
 pub enum InputEvent {
     Action(Action),
@@ -158,6 +159,13 @@ impl<F: Fn(InputEvent)> Pads<F> {
                 } else {
                     self.gamepads.insert(id.0, pad);
                     let name = cstr(unsafe { SDL_GetGamepadName(pad) });
+                    let mapping = unsafe { SDL_GetGamepadMapping(pad) };
+                    diag::log(&format!(
+                        "pad {} connected as gamepad: {name} | mapping: {}",
+                        id.0,
+                        cstr(mapping)
+                    ));
+                    unsafe { SDL_free(mapping.cast()) };
                     self.notice(format!("{name} connected"));
                 }
             }
@@ -172,6 +180,15 @@ impl<F: Fn(InputEvent)> Pads<F> {
             SDL_EVENT_GAMEPAD_BUTTON_DOWN | SDL_EVENT_GAMEPAD_BUTTON_UP => {
                 let b = unsafe { event.gbutton };
                 let button = SDL_GamepadButton(b.button as i32);
+                // During a game only the home combo matters, so log presses then to trace it.
+                if IN_GAME.load(Ordering::Relaxed) {
+                    let name = cstr(unsafe { SDL_GetGamepadStringForButton(button) });
+                    diag::log(&format!(
+                        "in game: pad {} button {name} {}",
+                        b.which.0,
+                        if b.down { "down" } else { "up" }
+                    ));
+                }
                 if button == SDL_GAMEPAD_BUTTON_BACK || button == SDL_GAMEPAD_BUTTON_START {
                     self.combo_button(b.which.0, button == SDL_GAMEPAD_BUTTON_START, b.down);
                 }
@@ -212,6 +229,7 @@ impl<F: Fn(InputEvent)> Pads<F> {
                 } else {
                     self.joysticks.insert(id.0, joy);
                     let name = cstr(unsafe { SDL_GetJoystickName(joy) });
+                    diag::log(&format!("pad {} connected in generic mode: {name}", id.0));
                     self.notice(format!("{name} connected (generic mode)"));
                 }
             }
@@ -241,6 +259,14 @@ impl<F: Fn(InputEvent)> Pads<F> {
             }
             SDL_EVENT_JOYSTICK_BUTTON_DOWN | SDL_EVENT_JOYSTICK_BUTTON_UP => {
                 let b = unsafe { event.jbutton };
+                if IN_GAME.load(Ordering::Relaxed) && self.joysticks.contains_key(&b.which.0) {
+                    diag::log(&format!(
+                        "in game: generic pad {} button {} {}",
+                        b.which.0,
+                        b.button,
+                        if b.down { "down" } else { "up" }
+                    ));
+                }
                 // Generic pads usually number Select 8 and Start 9.
                 if self.joysticks.contains_key(&b.which.0) && (b.button == 8 || b.button == 9) {
                     self.combo_button(b.which.0, b.button == 9, b.down);
@@ -358,6 +384,11 @@ impl<F: Fn(InputEvent)> Pads<F> {
     }
 
     fn combo_button(&mut self, id: u32, is_start: bool, down: bool) {
+        diag::log(&format!(
+            "combo: pad {id} {} {}",
+            if is_start { "start" } else { "select" },
+            if down { "down" } else { "up" }
+        ));
         let combo = self.combos.entry(id).or_default();
         if is_start {
             combo.start = down;
@@ -381,6 +412,7 @@ impl<F: Fn(InputEvent)> Pads<F> {
                     .is_some_and(|since| now.duration_since(since) >= COMBO_HOLD)
             {
                 combo.fired = true;
+                diag::log("combo: held 1 s, sending home combo");
                 (self.emit)(InputEvent::HomeCombo);
             }
         }

@@ -2,6 +2,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod config;
+mod diag;
 mod home;
 mod input;
 mod launcher;
@@ -47,6 +48,9 @@ struct App {
 fn main() -> Result<(), slint::PlatformError> {
     let ui = AppWindow::new()?;
     let data_dir = config::data_dir();
+    // Created here so even config errors are logged; the folder may not exist on first run.
+    let _ = std::fs::create_dir_all(&data_dir);
+    diag::init(&data_dir);
     let mut problems = Vec::new();
     let library = match config::load(&data_dir) {
         Ok(config) => library::load(&config, &data_dir.join("art")),
@@ -89,7 +93,7 @@ fn main() -> Result<(), slint::PlatformError> {
         show_hero(&ui, &mut app);
         problems.append(&mut app.images.problems);
         for problem in &problems {
-            eprintln!("[launcher] {problem}");
+            diag::log(problem);
         }
         if let Some(first) = problems.first() {
             let more = if problems.len() > 1 {
@@ -186,7 +190,7 @@ fn apply_effects(ui: &AppWindow, app_rc: &Rc<RefCell<App>>, effects: &[Effect]) 
     }
     push_scalars(ui, &app.home);
     for problem in app.images.problems.drain(..) {
-        eprintln!("[launcher] {problem}");
+        diag::log(&problem);
     }
     drop(app);
 
@@ -340,6 +344,10 @@ fn start_game(ui: &AppWindow, app: &mut App, game: usize) {
     });
     match started {
         Ok(running) => {
+            diag::log(&format!(
+                "started {} (pid {})",
+                app.home.games[game].title, running.root_pid
+            ));
             app.running = Some(running);
             app.home.running = Some(game);
             app.home.record_played(game, unix_now());
@@ -360,7 +368,10 @@ fn resume_game(ui: &AppWindow, app: &mut App) {
     match launcher::game_window(running) {
         Some(game_window) => {
             go_background(ui, app);
-            launcher::bring_to_front(game_window);
+            let in_front = launcher::bring_to_front(game_window);
+            diag::log(&format!(
+                "resumed game; game window in foreground: {in_front}"
+            ));
         }
         None => app
             .toasts
@@ -370,6 +381,11 @@ fn resume_game(ui: &AppWindow, app: &mut App) {
 
 /// Start + Select: over a game it brings the launcher up; in the launcher it returns to the game.
 fn home_combo(ui: &AppWindow, app: &mut App) {
+    diag::log(&format!(
+        "home combo received: game running: {}, launcher hidden: {}",
+        app.home.running.is_some(),
+        app.in_background
+    ));
     let Some(game) = app.home.running else { return };
     if app.in_background {
         come_back(ui, app);
@@ -384,6 +400,7 @@ fn home_combo(ui: &AppWindow, app: &mut App) {
 }
 
 fn game_ended(ui: &AppWindow, app: &mut App, message: &str) {
+    diag::log(&format!("game ended {message}"));
     let title = app
         .home
         .running
@@ -410,7 +427,7 @@ fn go_background(ui: &AppWindow, app: &mut App) {
     input::IN_GAME.store(true, Ordering::Relaxed);
     app.hero_timer.stop();
     if let Err(e) = ui.hide() {
-        eprintln!("[launcher] could not hide the window: {e}");
+        diag::log(&format!("could not hide the window: {e}"));
     }
     ui.set_has_hero(false);
     ui.set_hero_a(Image::default());
@@ -430,8 +447,11 @@ fn come_back(ui: &AppWindow, app: &mut App) {
     }
     ui.window().set_fullscreen(true);
     match window_handle(ui) {
-        Some(hwnd) => launcher::bring_to_front(hwnd),
-        None => eprintln!("[launcher] no window handle to bring to the front"),
+        Some(hwnd) => {
+            let in_front = launcher::bring_to_front(hwnd);
+            diag::log(&format!("launcher shown; in foreground: {in_front}"));
+        }
+        None => diag::log("launcher shown, but no window handle to bring to the front"),
     }
     push_selection(ui, app);
     push_scalars(ui, &app.home);
