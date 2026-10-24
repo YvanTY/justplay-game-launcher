@@ -46,6 +46,13 @@ const DEFAULT_CONFIG: &str = r#"# Game Launcher settings. Paths use single quote
 # args = '--fullscreen "{rom}"'
 # roms = 'E:\Roms\Switch'
 # extensions = ["nsp", "xci"]
+
+# --- Game art ----------------------------------------------------------------
+# Art comes from Steam, the Microsoft Store and PCGamingWiki without any account.
+# For many more covers, backgrounds and logos (what Playnite uses), add a free
+# SteamGridDB key: sign in at steamgriddb.com, then Preferences > API.
+# [art]
+# steamgriddb_key = "your key here"
 "#;
 
 #[derive(Debug, Default, Deserialize)]
@@ -54,6 +61,14 @@ pub struct Config {
     pub games: Vec<PcGame>,
     pub rpcs3: Option<Rpcs3Config>,
     pub systems: Vec<SystemConfig>,
+    pub art: ArtConfig,
+}
+
+#[derive(Debug, Default, Clone, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct ArtConfig {
+    /// Personal SteamGridDB API key; without it that source is skipped.
+    pub steamgriddb_key: Option<String>,
 }
 
 /// Also the shape of games added from the launcher, which state.json stores.

@@ -34,6 +34,8 @@ pub enum Effect {
         slot: usize,
         index: usize,
     },
+    /// Look for choices again (after a connection problem).
+    Retry,
     Close,
 }
 
@@ -50,6 +52,8 @@ pub struct ArtPicker {
     pub focus: [usize; 3],
     /// Choices are still being looked for and downloaded.
     pub searching: bool,
+    /// A source couldn't be reached (offline?): RB looks again.
+    pub trouble: bool,
 }
 
 impl ArtPicker {
@@ -76,6 +80,7 @@ impl ArtPicker {
             ],
             focus: [0; 3],
             searching: true,
+            trouble: false,
         }
     }
 
@@ -141,7 +146,8 @@ impl ArtPicker {
         let focus = &mut self.focus[self.slot];
         match action {
             Action::Up | Action::TabPrev => self.slot = self.slot.saturating_sub(1),
-            Action::Down | Action::TabNext => self.slot = (self.slot + 1).min(2),
+            Action::Down => self.slot = (self.slot + 1).min(2),
+            Action::TabNext if !self.searching => return Some(Effect::Retry),
             Action::Left => *focus = focus.saturating_sub(1),
             Action::Right => *focus = (*focus + 1).min(last),
             Action::PagePrev => *focus = focus.saturating_sub(PAGE),

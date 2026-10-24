@@ -12,7 +12,7 @@ use crate::AppWindow;
 use crate::library::discover::{self, Candidate, Known};
 use crate::library::find_image;
 use crate::scaled_art::{self, Kind, Pixels};
-use crate::{net, pcgw, steam};
+use crate::{msstore, net, pcgw, sgdb, steam};
 
 pub enum Event {
     /// A background finished decoding; None when this decoder can't read the file.
@@ -83,6 +83,8 @@ pub struct ArtJob {
     pub dir: PathBuf,
     /// Slots ("icon", "hero", "logo") the game has no image for.
     pub wanted: Vec<&'static str>,
+    /// SteamGridDB key from config.toml; without it that source is skipped.
+    pub sgdb_key: Option<String>,
 }
 
 #[derive(Clone)]
@@ -190,9 +192,72 @@ fn fetch_art(job: &ArtJob, mut on_image: impl FnMut()) -> Result<ArtOutcome, net
             landed(steam::download(app, &job.dir, &[slot])?);
         }
     }
-    if !missing().is_empty()
-        && let Some(wiki) = pcgw::lookup(&job.title)?
+    // The other sources are extras: one failing doesn't stop the rest. If something is still
+    // missing afterwards, the failure is reported so the lookup is tried again later.
+    let mut trouble = None;
+    let mut soft = |result: Result<bool, net::Error>| match result {
+        Ok(found) => found,
+        Err(e) => {
+            trouble.get_or_insert(e);
+            false
+        }
+    };
+    // SteamGridDB (with a key): community art for almost any game.
+    if let Some(key) = &job.sgdb_key
+        && !missing().is_empty()
     {
+        soft((|| {
+            let Some(game) = sgdb::find(key, &job.title)? else {
+                return Ok(false);
+            };
+            known = true;
+            for (slot, kind) in [("icon", "grids"), ("hero", "heroes"), ("logo", "logos")] {
+                if missing().contains(&slot)
+                    && let Some(image) = sgdb::images(key, game, kind)?.into_iter().next()
+                {
+                    landed(usize::from(steam::save(&image.url, &job.dir, slot)?));
+                }
+            }
+            Ok(true)
+        })());
+    }
+    // The Microsoft Store: a portrait cover and 16:9 key art, also for games Steam never sold.
+    if missing().contains(&"icon") || missing().contains(&"hero") {
+        soft((|| {
+            let Some(id) = msstore::find(&job.title)? else {
+                return Ok(false);
+            };
+            known = true;
+            let art = msstore::art(&id)?;
+            if missing().contains(&"icon")
+                && let Some(cover) = art.covers.first()
+            {
+                landed(usize::from(steam::save(
+                    &msstore::sized(cover, 600),
+                    &job.dir,
+                    "icon",
+                )?));
+            }
+            if missing().contains(&"hero")
+                && let Some(background) = art.backgrounds.first()
+            {
+                landed(usize::from(steam::save(background, &job.dir, "hero")?));
+            }
+            Ok(true)
+        })());
+    }
+    let wiki = if missing().is_empty() {
+        None
+    } else {
+        match pcgw::lookup(&job.title) {
+            Ok(wiki) => wiki,
+            Err(e) => {
+                trouble.get_or_insert(e);
+                None
+            }
+        }
+    };
+    if let Some(wiki) = wiki {
         known = true;
         if let Some(app) = wiki.steam_app.filter(|app| !apps.contains(app)) {
             apps.push(app);
@@ -214,6 +279,11 @@ fn fetch_art(job: &ArtJob, mut on_image: impl FnMut()) -> Result<ArtOutcome, net
             landed(usize::from(steam::download_banner(app, &job.dir)?));
         }
     }
+    if let Some(e) = trouble
+        && !missing().is_empty()
+    {
+        return Err(e);
+    }
     Ok(if known {
         ArtOutcome::Found {
             app: apps.first().copied(),
@@ -232,6 +302,9 @@ pub struct ChoicesJob {
     /// The art in use per slot.
     pub current: [Option<PathBuf>; 3],
     pub scale: f32,
+    pub sgdb_key: Option<String>,
+    /// The folder the game's exe is in: repacks often ship a cover there.
+    pub game_dir: Option<PathBuf>,
 }
 
 /// Gathers every picture worth offering on the Choose art screen.
@@ -276,11 +349,27 @@ fn gather_choices(
         }
     }
 
-    let apps: Vec<(u32, String)> = steam::search(&job.title)?
+    if let Some(dir) = &job.game_dir {
+        for (slot, path) in folder_art(dir) {
+            offer(
+                notifier,
+                job,
+                slot,
+                path,
+                "From the game's folder".into(),
+                false,
+                None,
+            );
+        }
+    }
+
+    let mut apps: Vec<(u32, String)> = steam::search(&job.title)?
         .into_iter()
         .filter(|(_, name)| !steam::is_add_on(name))
-        .take(4)
         .collect();
+    // The game itself before its sequels (stable: store relevance otherwise).
+    apps.sort_by_key(|(_, name)| steam::adds_a_number(&job.title, name));
+    apps.truncate(4);
 
     // Steam's matches start downloading at once; PCGamingWiki (a slower site, several requests)
     // is asked alongside them rather than before.
@@ -292,7 +381,20 @@ fn gather_choices(
                 scope.spawn(move || choices_from_app(&notifier, job, cancel, *app, name))
             })
             .collect();
+        let store = {
+            let notifier = notifier.clone();
+            scope.spawn(move || choices_from_msstore(&notifier, job, cancel))
+        };
+        let grid = job.sgdb_key.as_ref().map(|key| {
+            let notifier = notifier.clone();
+            scope.spawn(move || choices_from_sgdb(&notifier, job, cancel, key))
+        });
         let mut result = choices_from_wiki(notifier, job, cancel, &apps);
+        for worker in std::iter::once(store).chain(grid) {
+            if let Ok(Err(e)) = worker.join() {
+                result = Err(e);
+            }
+        }
         for worker in workers {
             if let Ok(Err(e)) = worker.join() {
                 result = Err(e);
@@ -300,6 +402,144 @@ fn gather_choices(
         }
         result
     })
+}
+
+/// Pictures repacks and game folders often ship (game.jpg, cover.png, folder.jpg…), with the
+/// row each fits: backgrounds and logos by name, anything else as a cover.
+fn folder_art(dir: &std::path::Path) -> Vec<(usize, PathBuf)> {
+    const COVERS: &[&str] = &[
+        "game", "cover", "folder", "poster", "boxart", "box", "front", "icon",
+    ];
+    const BACKGROUNDS: &[&str] = &["background", "fanart", "hero", "banner", "wallpaper"];
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    let mut found: Vec<(usize, PathBuf)> = entries
+        .flatten()
+        .map(|e| e.path())
+        .filter_map(|path| {
+            let extension = path.extension()?.to_string_lossy().to_lowercase();
+            if !matches!(extension.as_str(), "jpg" | "jpeg" | "png" | "webp") {
+                return None;
+            }
+            let stem = path.file_stem()?.to_string_lossy().to_lowercase();
+            let slot = if stem.contains("logo") {
+                2
+            } else if BACKGROUNDS.iter().any(|b| stem.contains(b)) {
+                1
+            } else if COVERS.contains(&stem.as_str()) {
+                0
+            } else {
+                return None;
+            };
+            Some((slot, path))
+        })
+        .collect();
+    found.sort();
+    found
+}
+
+/// The Microsoft Store's best matches: posters and key art as covers, 16:9 key art and
+/// screenshots as backgrounds.
+fn choices_from_msstore(
+    notifier: &Notifier,
+    job: &ChoicesJob,
+    cancel: &AtomicBool,
+) -> Result<(), net::Error> {
+    let mut products = msstore::search(&job.title)?;
+    // The game itself before its sequels (stable: store relevance otherwise).
+    products.sort_by_key(|p| steam::adds_a_number(&job.title, &p.title));
+    std::thread::scope(|scope| {
+        let workers: Vec<_> = products
+            .into_iter()
+            .take(5)
+            .enumerate()
+            .map(|(p, product)| {
+                let notifier = notifier.clone();
+                scope.spawn(move || msstore_product(&notifier, job, cancel, p, &product))
+            })
+            .collect();
+        let mut result = Ok(());
+        for worker in workers {
+            if let Ok(Err(e)) = worker.join() {
+                result = Err(e);
+            }
+        }
+        result
+    })
+}
+
+/// One Microsoft Store product's covers, backgrounds and screenshots.
+fn msstore_product(
+    notifier: &Notifier,
+    job: &ChoicesJob,
+    cancel: &AtomicBool,
+    p: usize,
+    product: &msstore::Product,
+) -> Result<(), net::Error> {
+    if cancel.load(Ordering::Relaxed) {
+        return Ok(());
+    }
+    {
+        let art = msstore::art(&product.id)?;
+        let name = &product.title;
+        let picks = art
+            .covers
+            .iter()
+            .map(|url| (0, url, 300, format!("Microsoft Store · {name}")))
+            .chain(
+                art.backgrounds
+                    .iter()
+                    .map(|url| (1, url, 640, format!("Microsoft Store · {name}"))),
+            )
+            .chain(
+                art.screenshots
+                    .iter()
+                    .take(4)
+                    .enumerate()
+                    .map(|(i, url)| (1, url, 640, format!("Screenshot {} · {name}", i + 1))),
+            );
+        for (n, (slot, url, width, label)) in picks.enumerate() {
+            if let Some(path) = fetch(
+                job,
+                cancel,
+                &msstore::sized(url, width),
+                &format!("ms{p}-{n}"),
+            )? {
+                offer(notifier, job, slot, path, label, false, Some(url.clone()));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// SteamGridDB (with a key): many community covers, backgrounds and logos.
+fn choices_from_sgdb(
+    notifier: &Notifier,
+    job: &ChoicesJob,
+    cancel: &AtomicBool,
+    key: &str,
+) -> Result<(), net::Error> {
+    let games = sgdb::search(key, &job.title)?;
+    // The clearly matching game, else the most relevant result: the user picks what fits.
+    let index =
+        steam::best_title(&job.title, games.iter().map(|(_, name)| name.as_str())).unwrap_or(0);
+    let Some((game, name)) = games.get(index) else {
+        return Ok(());
+    };
+    for (slot, kind, limit) in [(0, "grids", 12), (2, "logos", 8), (1, "heroes", 8)] {
+        for (i, image) in sgdb::images(key, *game, kind)?
+            .into_iter()
+            .take(limit)
+            .enumerate()
+        {
+            if let Some(path) = fetch(job, cancel, &image.thumb, &format!("sg-{kind}-{i}"))? {
+                let label = format!("SteamGridDB · {name}");
+                offer(notifier, job, slot, path, label, false, Some(image.url));
+            }
+        }
+    }
+    Ok(())
 }
 
 /// PCGamingWiki's cover, and the pictures of the store page it knows if Steam's search didn't
@@ -357,7 +597,7 @@ fn choices_from_app(
     if cancel.load(Ordering::Relaxed) {
         return Ok(());
     }
-    for (i, shot) in steam::screenshots(app)?.into_iter().take(3).enumerate() {
+    for (i, shot) in steam::screenshots(app)?.into_iter().take(6).enumerate() {
         if let Some(path) = fetch(job, cancel, &shot.thumbnail, &format!("{app}-shot{i}"))? {
             let label = format!("Screenshot {} · {name}", i + 1);
             offer(notifier, job, 1, path, label, false, Some(shot.full));
@@ -480,6 +720,76 @@ mod tests {
 
     /// Yvan's games that found no art with the first lookup. Downloads into a temporary folder:
     /// `cargo test yvans_titles -- --ignored --nocapture`.
+    /// Every source the Choose art screen uses, for an ambiguous Switch title:
+    /// `cargo test live_picker_choices -- --ignored --nocapture`.
+    #[test]
+    #[ignore]
+    fn live_picker_choices() {
+        let (notifier, events) = Notifier::new(slint::Weak::default());
+        let cache = std::env::temp_dir().join(format!("gl-picker-{}", std::process::id()));
+        let job = ChoicesJob {
+            game: "x".into(),
+            title: "Demon Slayer - Kimetsu no Yaiba".into(),
+            cache: cache.clone(),
+            current: [None, None, None],
+            scale: 1.0,
+            sgdb_key: None,
+            game_dir: None,
+        };
+        let started = std::time::Instant::now();
+        let cancel = AtomicBool::new(false);
+        let result = gather_choices(&notifier, &job, &cancel);
+        println!(
+            "gather: {:?} after {:?}",
+            result.err().map(|e| e.to_string()),
+            started.elapsed()
+        );
+        let mut counts = [0; 3];
+        for event in events.try_iter() {
+            if let Event::ArtChoice { slot, label, .. } = event {
+                counts[slot] += 1;
+                if counts[slot] <= 3 {
+                    println!("  slot {slot}: {label}");
+                }
+            }
+        }
+        println!("choices per slot: {counts:?}");
+        assert!(
+            counts.iter().all(|&n| n > 0),
+            "covers, backgrounds and logos"
+        );
+        let _ = std::fs::remove_dir_all(&cache);
+    }
+
+    #[test]
+    fn folder_pictures_go_to_the_row_they_fit() {
+        let dir = std::env::temp_dir().join(format!("gl-folder-art-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        for name in [
+            "game.jpg",
+            "Background.png",
+            "logo_big.png",
+            "readme.txt",
+            "shot01.jpg",
+        ] {
+            std::fs::write(dir.join(name), b"x").unwrap();
+        }
+        let found: Vec<(usize, String)> = folder_art(&dir)
+            .into_iter()
+            .map(|(slot, p)| (slot, p.file_name().unwrap().to_string_lossy().into_owned()))
+            .collect();
+        assert_eq!(
+            found,
+            [
+                (0, "game.jpg".to_string()),
+                (1, "Background.png".to_string()),
+                (2, "logo_big.png".to_string())
+            ]
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     #[ignore]
     fn yvans_titles() {
@@ -498,6 +808,7 @@ mod tests {
                 title: title.into(),
                 dir: root.join(crate::library::safe_file_name(title)),
                 wanted: vec!["icon", "hero", "logo"],
+                sgdb_key: None,
             };
             let outcome = fetch_art(&job, || {}).unwrap();
             let files: Vec<String> = std::fs::read_dir(&job.dir)

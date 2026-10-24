@@ -59,7 +59,6 @@ const NOT_THE_GAME: &[&str] = &[
     "coins",
     "points",
     "currency",
-    "season",
 ];
 
 /// Art folder slot, then the Steam images to try for it, sharpest first.
@@ -92,7 +91,10 @@ pub fn find(title: &str) -> Result<Option<u32>, net::Error> {
 
 /// Every app the store search returns for `title`, most relevant first: (app id, name).
 pub fn search(title: &str) -> Result<Vec<(u32, String)>, net::Error> {
-    let body = net::get(&format!("{SEARCH}{}", net::encode(title)))?;
+    let body = net::get(&format!(
+        "{SEARCH}{}",
+        net::encode(&net::search_words(title))
+    ))?;
     let search: Search = serde_json::from_slice(&body)
         .map_err(|e| net::Error::Failed(format!("unexpected Steam answer: {e}")))?;
     Ok(search
@@ -101,6 +103,16 @@ pub fn search(title: &str) -> Result<Vec<(u32, String)>, net::Error> {
         .filter(|i| i.kind.is_empty() || i.kind == "app")
         .map(|i| (i.id, i.name))
         .collect())
+}
+
+/// A sequel or other numbered game the title doesn't name: "Hinokami Chronicles 2" when looking
+/// for "Demon Slayer Kimetsu no Yaiba". Such matches are offered after the others.
+pub fn adds_a_number(title: &str, name: &str) -> bool {
+    let wanted = normalize(title);
+    let wanted: Vec<&str> = wanted.split(' ').collect();
+    normalize(name)
+        .split(' ')
+        .any(|word| word.chars().all(|c| c.is_ascii_digit()) && !wanted.contains(&word))
 }
 
 /// Soundtracks, DLC, passes: products sold under a game's name that aren't the game.
@@ -340,6 +352,23 @@ mod tests {
             best("PRO EVOLUTION SOCCER 2019", &["Pro Evolution Soccer 2019"]),
             Some(0)
         );
+    }
+
+    #[test]
+    fn sequels_are_told_apart() {
+        let title = "Demon Slayer - Kimetsu no Yaiba";
+        assert!(adds_a_number(
+            title,
+            "Demon Slayer -Kimetsu no Yaiba- The Hinokami Chronicles 2"
+        ));
+        assert!(!adds_a_number(
+            title,
+            "Demon Slayer -Kimetsu no Yaiba- The Hinokami Chronicles"
+        ));
+        assert!(!adds_a_number(
+            "eFootball PES 2021",
+            "eFootball PES 2021 SEASON UPDATE"
+        ));
     }
 
     #[test]

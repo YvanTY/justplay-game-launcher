@@ -91,6 +91,11 @@ fn ok(result: i32, step: &str) -> Result<(), Error> {
 }
 
 pub fn get(url: &str) -> Result<Vec<u8>, Error> {
+    get_with_header(url, None)
+}
+
+/// `header` is one extra request header, e.g. `Authorization: Bearer <key>`.
+pub fn get_with_header(url: &str, header: Option<&str>) -> Result<Vec<u8>, Error> {
     let rest = url
         .strip_prefix("https://")
         .ok_or_else(|| Error::Failed(format!("not an https URL: {url}")))?;
@@ -121,7 +126,13 @@ pub fn get(url: &str) -> Result<Vec<u8>, Error> {
             "WinHttpOpenRequest",
         )?;
         ok(
-            WinHttpSendRequest(request.0, null(), 0, null(), 0, 0, 0),
+            match header.map(wide) {
+                // u32::MAX: the header string ends with its NUL.
+                Some(header) => {
+                    WinHttpSendRequest(request.0, header.as_ptr(), u32::MAX, null(), 0, 0, 0)
+                }
+                None => WinHttpSendRequest(request.0, null(), 0, null(), 0, 0, 0),
+            },
             "WinHttpSendRequest",
         )?;
         ok(
@@ -175,6 +186,20 @@ pub fn get(url: &str) -> Result<Vec<u8>, Error> {
     }
 }
 
+/// A title as search words: "Demon Slayer - Kimetsu no Yaiba" finds nothing on Steam, while
+/// "Demon Slayer Kimetsu no Yaiba" does. Punctuation and trademark signs become spaces
+/// (apostrophes are dropped: "Dante's" searches as "Dantes"). Matching still uses the title.
+pub fn search_words(title: &str) -> String {
+    title
+        .chars()
+        .filter(|c| *c != '\'' && *c != '’')
+        .map(|c| if c.is_alphanumeric() { c } else { ' ' })
+        .collect::<String>()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 /// Percent-encodes a query value (everything but unreserved characters).
 pub fn encode(text: &str) -> String {
     text.bytes()
@@ -194,6 +219,22 @@ fn wide(text: &str) -> Vec<u16> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn titles_become_plain_search_words() {
+        assert_eq!(
+            search_words("Demon Slayer - Kimetsu no Yaiba"),
+            "Demon Slayer Kimetsu no Yaiba"
+        );
+        assert_eq!(
+            search_words("NARUTO SHIPPUDEN: Ultimate Ninja STORM 4"),
+            "NARUTO SHIPPUDEN Ultimate Ninja STORM 4"
+        );
+        assert_eq!(
+            search_words("The Last of Us™ Part I"),
+            "The Last of Us Part I"
+        );
+    }
 
     #[test]
     fn query_values_are_percent_encoded() {

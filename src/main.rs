@@ -14,11 +14,13 @@ mod input;
 mod launcher;
 mod library;
 mod menus;
+mod msstore;
 mod music;
 mod nav;
 mod net;
 mod pcgw;
 mod scaled_art;
+mod sgdb;
 mod state;
 mod steam;
 
@@ -55,6 +57,12 @@ const HERO_DELAY: Duration = Duration::from_millis(140);
 const HERO_CACHE: usize = 2;
 /// How often plugged/unplugged drives are noticed while the launcher is visible (one cheap call).
 const DRIVE_POLL: Duration = Duration::from_secs(2);
+/// When a failed art lookup (no connection) is tried again during the session.
+const RETRY_DELAYS: [Duration; 3] = [
+    Duration::from_secs(30),
+    Duration::from_secs(120),
+    Duration::from_secs(600),
+];
 /// The mouse pointer hides again after this long without moving.
 const POINTER_IDLE: Duration = Duration::from_secs(3);
 
@@ -98,9 +106,10 @@ struct App {
     art_fetcher: std::sync::mpsc::Sender<ArtJob>,
     /// Game ids whose Steam lookup is queued or running.
     art_pending: HashSet<String>,
-    /// Lookups that failed (offline) this session; tried again at the next start, not on
-    /// every reload.
-    art_failed: HashSet<String>,
+    /// Lookups that failed (offline): how many times this session, and when to try again.
+    art_failed: HashMap<String, (u32, std::time::Instant)>,
+    /// SteamGridDB key from config.toml (None: that source is skipped).
+    sgdb_key: Option<String>,
     notifier: background::Notifier,
     /// The Add games screen, and the switch that stops its drive scan.
     add_games: add_games::AddGames,
@@ -153,8 +162,16 @@ fn main() -> Result<(), slint::PlatformError> {
     }
     problems.extend(state_problem);
     let drive_mask = library::drives::mask();
+    let mut sgdb_key = None;
     let library = match config::load(&data_dir) {
-        Ok(config) => library::load(&config, &state.added_games, &data_dir),
+        Ok(config) => {
+            sgdb_key = config
+                .art
+                .steamgriddb_key
+                .clone()
+                .filter(|k| !k.trim().is_empty());
+            library::load(&config, &state.added_games, &data_dir)
+        }
         Err(e) => {
             problems.push(e);
             Library {
@@ -212,7 +229,8 @@ fn main() -> Result<(), slint::PlatformError> {
         hero_loader: background::spawn_hero_loader(notifier.clone()),
         art_fetcher: background::spawn_art_fetcher(notifier.clone()),
         art_pending: HashSet::new(),
-        art_failed: HashSet::new(),
+        art_failed: HashMap::new(),
+        sgdb_key,
         notifier,
         add_games: add_games::AddGames::default(),
         scan_cancel: Arc::new(AtomicBool::new(false)),
@@ -962,8 +980,7 @@ fn drain_background(ui: &AppWindow, app: &mut App) {
                     picker.searching = false;
                     if let Some(e) = error {
                         diag::log(&format!("art choices for {game}: {e}"));
-                        app.toasts
-                            .show(ui, "Couldn't reach Steam: showing what was found".into());
+                        picker.trouble = true;
                     }
                     sync_art_screen(ui, app);
                 }
@@ -1027,14 +1044,18 @@ fn queue_art_lookups(app: &mut App) {
         art_fetcher,
         art_pending,
         art_failed,
+        sgdb_key,
         ..
     } = app;
+    let now = std::time::Instant::now();
     for game in &home.games {
         let folder = art_dir.join(library::safe_file_name(&game.title));
         if game.platform != "PC"
             || home.state.art_lookups.contains_key(&game.id)
             || art_pending.contains(&game.id)
-            || art_failed.contains(&game.id)
+            || art_failed
+                .get(&game.id)
+                .is_some_and(|&(tries, next)| tries > RETRY_DELAYS.len() as u32 || next > now)
         {
             continue;
         }
@@ -1056,6 +1077,7 @@ fn queue_art_lookups(app: &mut App) {
             title: game.title.clone(),
             dir: folder,
             wanted,
+            sgdb_key: sgdb_key.clone(),
         };
         if art_fetcher.send(job).is_ok() {
             art_pending.insert(game.id.clone());
@@ -1081,9 +1103,15 @@ fn art_fetched(ui: &AppWindow, app: &mut App, id: String, outcome: ArtOutcome) {
             None
         }
         ArtOutcome::Failed(e) => {
-            // Not saved, so the next start tries again.
+            // Not saved: tried again later this session (see RETRY_DELAYS), then next start.
             diag::log(&format!("art for {id}: {e}"));
-            app.art_failed.insert(id);
+            let tries = app.art_failed.get(&id).map_or(0, |&(t, _)| t) + 1;
+            let delay = RETRY_DELAYS
+                .get(tries as usize - 1)
+                .copied()
+                .unwrap_or(Duration::MAX / 4);
+            app.art_failed
+                .insert(id, (tries, std::time::Instant::now() + delay));
             return;
         }
     };
@@ -1613,6 +1641,8 @@ fn open_art_picker(ui: &AppWindow, app: &mut App, game: usize) {
         cache: art_choices_dir(&data_dir).join(folder),
         current,
         scale: scaled_art::screen_scale(),
+        sgdb_key: app.sgdb_key.clone(),
+        game_dir: game.launch.exe.parent().map(Path::to_path_buf),
     };
     app.art_cancel.store(true, Ordering::Relaxed);
     app.art_cancel = Arc::new(AtomicBool::new(false));
@@ -1635,6 +1665,13 @@ fn handle_art_action(ui: &AppWindow, app: &mut App, action: Action) {
     let sound = match effect {
         Some(art_picker::Effect::Apply { slot, index }) => {
             apply_art(ui, app, slot, index);
+            Some(Sound::Confirm)
+        }
+        Some(art_picker::Effect::Retry) => {
+            let id = app.art_picker.as_ref().map(|p| p.game.clone());
+            if let Some(game) = id.and_then(|id| app.home.games.iter().position(|g| g.id == id)) {
+                open_art_picker(ui, app, game);
+            }
             Some(Sound::Confirm)
         }
         Some(art_picker::Effect::Close) => {
@@ -1754,9 +1791,11 @@ fn sync_art_screen(ui: &AppWindow, app: &mut App) {
     ui.set_art_title(picker.title.as_str().into());
     ui.set_art_status(
         if picker.searching {
-            format!("Looking for art on Steam and PCGamingWiki… {found} pictures so far")
+            format!("Looking for art… {found} pictures so far")
+        } else if picker.trouble {
+            format!("{found} pictures found · some sources couldn't be reached (internet?) · RB to look again")
         } else {
-            format!("{found} pictures found · the one marked In use is shown now")
+            format!("{found} pictures found · RB to look again")
         }
         .into(),
     );
@@ -2524,6 +2563,11 @@ fn reload_library(ui: &AppWindow, app: &mut App) -> Result<Vec<String>, String> 
     let config = config::load(&data_dir)?;
     // Read before loading: a drive plugged in during the load then still counts as a change.
     let mask = library::drives::mask();
+    app.sgdb_key = config
+        .art
+        .steamgriddb_key
+        .clone()
+        .filter(|k| !k.trim().is_empty());
     let library = library::load(&config, &app.home.state.added_games, &data_dir);
     for warning in &library.warnings {
         diag::log(warning);
@@ -2550,6 +2594,14 @@ fn start_drive_watch(ui: &AppWindow, app_rc: &Rc<RefCell<App>>) {
             // A callback already holding the app (e.g. mid-reload) just skips this tick.
             if let (Some(ui), Ok(mut app)) = (weak.upgrade(), app.try_borrow_mut()) {
                 check_drives(&ui, &mut app);
+                let now = std::time::Instant::now();
+                let due = app
+                    .art_failed
+                    .values()
+                    .any(|&(tries, next)| tries <= RETRY_DELAYS.len() as u32 && next <= now);
+                if due {
+                    queue_art_lookups(&mut app);
+                }
             }
         });
 }

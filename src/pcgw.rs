@@ -68,7 +68,7 @@ fn page_text(title: &str) -> Result<Option<String>, net::Error> {
 fn search(title: &str) -> Result<Vec<String>, net::Error> {
     let json = api(&format!(
         "action=query&list=search&srlimit=5&srsearch={}",
-        net::encode(title)
+        net::encode(&net::search_words(title))
     ))?;
     Ok(json["query"]["search"]
         .as_array()
