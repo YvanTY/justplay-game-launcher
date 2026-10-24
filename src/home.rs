@@ -111,6 +111,30 @@ impl Home {
         }
     }
 
+    /// Over a running game: select it and open its menu on "Close game", so closing is one press.
+    pub fn open_close_menu(&mut self) {
+        let Some(game) = self.running else { return };
+        if !self.tab().games.contains(&game) {
+            // Home lists every game, so the running one is always there.
+            self.current = 0;
+        }
+        let tab = &mut self.tabs[self.current];
+        if let Some(position) = tab.games.iter().position(|&g| g == game) {
+            tab.focus = position;
+        }
+        // The menu opens beside the ⋯ button, so show that button as the active one.
+        self.zone = Zone::Actions;
+        self.action = 1;
+        self.sheet = Some(Sheet { game, focus: 0 });
+        let close = self
+            .sheet_items()
+            .iter()
+            .position(|&item| item == SheetItem::CloseGame);
+        if let (Some(sheet), Some(close)) = (self.sheet.as_mut(), close) {
+            sheet.focus = close;
+        }
+    }
+
     pub fn record_played(&mut self, game: usize, unix_seconds: u64) {
         let id = self.games[game].id.clone();
         self.state.last_played.insert(id, unix_seconds);
@@ -489,6 +513,27 @@ mod tests {
         home.running = None;
         let effects = home.handle(Action::Confirm);
         assert!(effects.contains(&Effect::SaveState), "{effects:?}");
+    }
+
+    #[test]
+    fn close_menu_selects_running_game_and_closes_in_one_press() {
+        let mut home = Home::new(sample(), State::default());
+        home.running = Some(3);
+        home.handle(Action::TabNext); // PC tab
+        home.open_close_menu();
+        assert_eq!(home.selected_game(), Some(3));
+        assert!(home.sheet.is_some());
+        assert_eq!(home.handle(Action::Confirm), [Effect::CloseGame]);
+    }
+
+    #[test]
+    fn close_menu_switches_to_home_when_running_game_is_not_in_tab() {
+        let mut home = Home::new(sample(), State::default());
+        home.running = Some(0); // a PS3 game
+        home.handle(Action::TabNext); // PC tab
+        home.open_close_menu();
+        assert_eq!(home.current, 0);
+        assert_eq!(home.selected_game(), Some(0));
     }
 
     #[test]

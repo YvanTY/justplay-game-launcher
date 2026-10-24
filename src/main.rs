@@ -364,6 +364,7 @@ fn start_game(ui: &AppWindow, app: &mut App, game: usize) {
 }
 
 fn resume_game(ui: &AppWindow, app: &mut App) {
+    app.home.sheet = None;
     let Some(running) = &app.running else { return };
     match launcher::game_window(running) {
         Some(game_window) => {
@@ -388,11 +389,13 @@ fn home_combo(ui: &AppWindow, app: &mut App) {
     ));
     let Some(game) = app.home.running else { return };
     if app.in_background {
+        app.home.open_close_menu();
+        push_tabs(ui, app);
         come_back(ui, app);
         let title = app.home.games[game].title.clone();
         app.toasts.show(
             ui,
-            format!("{title} is still running: Resume or close it from ⋯"),
+            format!("Press A to close {title}, or hold Start + Select to go back to it"),
         );
     } else {
         resume_game(ui, app);
