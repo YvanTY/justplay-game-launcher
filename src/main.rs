@@ -1254,10 +1254,11 @@ fn use_screen_layout(
         }
     }
     let state = &mut app.home.state;
-    if wanted == original && state.display_restore.take().is_some() {
-        if let Err(e) = state.save(&app.state_path) {
-            diag::log(&e);
-        }
+    if wanted == original
+        && state.display_restore.take().is_some()
+        && let Err(e) = state.save(&app.state_path)
+    {
+        diag::log(&e);
     }
 }
 
