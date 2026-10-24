@@ -3,6 +3,7 @@
 
 mod audio;
 mod config;
+mod controllers;
 mod diag;
 mod emulation;
 mod home;
@@ -26,7 +27,7 @@ use slint::{Color, Image, ModelRc, SharedString, Timer, TimerMode, VecModel};
 use audio::{Audio, Sound};
 use emulation::Translate;
 use home::{Effect, Home, NavState, SheetItem};
-use input::InputEvent;
+use input::{InputEvent, PadInfo};
 use launcher::{Ended, Running};
 use library::{Game, Library};
 use menus::{MenuEffect, Menus, Overlay, Setting};
@@ -52,6 +53,13 @@ struct App {
     /// True while the launcher is hidden behind a running game.
     in_background: bool,
     menus: Menus,
+    /// Controllers screen: connected pads, which one is shown, the selected button, and
+    /// whether it waits for a key/button to add.
+    pads: Vec<PadInfo>,
+    pad_index: usize,
+    remap_selected: usize,
+    capturing: bool,
+    controller_events: std::sync::mpsc::Receiver<InputEvent>,
     /// None when the PC has no usable audio output; the launcher works silently then.
     audio: Option<Rc<Audio>>,
     music: Option<Rc<Music>>,
@@ -96,6 +104,7 @@ fn main() -> Result<(), slint::PlatformError> {
     let music = audio
         .as_ref()
         .map(|audio| Rc::new(Music::start(audio.device())));
+    let (controller_sender, controller_events) = std::sync::mpsc::channel::<InputEvent>();
     let app = Rc::new(RefCell::new(App {
         home: Home::new(library.games, state),
         images: ImageCache::default(),
@@ -107,6 +116,11 @@ fn main() -> Result<(), slint::PlatformError> {
         running: None,
         in_background: false,
         menus: Menus::new(),
+        pads: Vec::new(),
+        pad_index: 0,
+        remap_selected: 0,
+        capturing: false,
+        controller_events,
         audio,
         music,
         audio_timer: Timer::default(),
@@ -115,6 +129,9 @@ fn main() -> Result<(), slint::PlatformError> {
     {
         let mut app = app.borrow_mut();
         apply_volumes(&app);
+        if let Ok(mut remaps) = controllers::REMAPS.write() {
+            *remaps = app.home.state.controller_remaps.clone();
+        }
         push_menus(&ui, &app);
         push_tabs(&ui, &mut app);
         push_selection(&ui, &mut app);
@@ -178,15 +195,34 @@ fn main() -> Result<(), slint::PlatformError> {
     });
 
     let weak = ui.as_weak();
+    ui.on_controller_event({
+        let weak = ui.as_weak();
+        let app = app.clone();
+        move || drain_controller_events(&weak.unwrap(), &mut app.borrow_mut())
+    });
+
     input::spawn(move |event| {
         let weak = weak.clone();
+        // Controllers-screen events carry data Slint callbacks can't, so they queue in a channel
+        // and the callback only says "something arrived".
+        let event = match event {
+            InputEvent::Pads(_)
+            | InputEvent::Live(_)
+            | InputEvent::Captured(_)
+            | InputEvent::CaptureTimedOut => {
+                let _ = controller_sender.send(event);
+                None
+            }
+            other => Some(other),
+        };
         // Only fails once the event loop has shut down, when there is nothing left to update.
         let _ = slint::invoke_from_event_loop(move || {
             let Some(ui) = weak.upgrade() else { return };
             match event {
-                InputEvent::Action(action) => ui.invoke_action(action),
-                InputEvent::Notice(text) => ui.invoke_notify(text.into()),
-                InputEvent::HomeCombo => ui.invoke_home_combo(),
+                Some(InputEvent::Action(action)) => ui.invoke_action(action),
+                Some(InputEvent::Notice(text)) => ui.invoke_notify(text.into()),
+                Some(InputEvent::HomeCombo) => ui.invoke_home_combo(),
+                _ => ui.invoke_controller_event(),
             }
         });
     });
@@ -723,6 +759,10 @@ impl Toasts {
 
 /// Quick panel, Power and Settings: navigation, then whatever the chosen item does.
 fn handle_menu_action(ui: &AppWindow, app: &mut App, action: Action) {
+    if app.menus.overlay == Overlay::Controllers && action != Action::Menu {
+        handle_controllers_action(ui, app, action);
+        return;
+    }
     let snapshot = |m: &Menus| (m.overlay, m.panel_focus, m.power_focus, m.settings_focus);
     let before = snapshot(&app.menus);
     let effects = app.menus.handle(action);
@@ -772,6 +812,181 @@ fn handle_menu_action(ui: &AppWindow, app: &mut App, action: Action) {
         }
     }
     push_menus(ui, app);
+    sync_controllers_screen(ui, app);
+}
+
+/// The Controllers screen: move through the button lists, A to add a key/button, Y to clear.
+fn handle_controllers_action(ui: &AppWindow, app: &mut App, action: Action) {
+    // While waiting, the input thread delivers the next key/button; actions are ignored so the
+    // press that is being captured doesn't also navigate.
+    if app.capturing {
+        return;
+    }
+    let before = (app.remap_selected, app.pad_index);
+    let sound = match action {
+        Action::Up | Action::Down | Action::Left | Action::Right => {
+            app.remap_selected = controllers::navigate(app.remap_selected, action);
+            Some(if before.0 != app.remap_selected {
+                Sound::Move
+            } else {
+                Sound::Bump
+            })
+        }
+        Action::TabPrev | Action::TabNext if app.pads.len() > 1 => {
+            let delta = if action == Action::TabNext { 1 } else { -1 };
+            app.pad_index = nav::wrap_index(app.pad_index, app.pads.len(), delta);
+            Some(Sound::Tab)
+        }
+        Action::Confirm if app.pads.get(app.pad_index).is_some() => {
+            app.capturing = true;
+            input::CAPTURE.store(true, Ordering::Relaxed);
+            Some(Sound::Confirm)
+        }
+        Action::Confirm => {
+            app.toasts.show(ui, "Connect a controller first".into());
+            None
+        }
+        Action::Options => {
+            let button = controllers::ALL[app.remap_selected];
+            if let Some(pad) = app.pads.get(app.pad_index)
+                && let Some(profile) = app.home.state.controller_remaps.get_mut(&pad.guid)
+            {
+                profile.clear(button);
+            }
+            save_remaps(ui, app);
+            Some(Sound::Back)
+        }
+        Action::Back => {
+            app.menus.overlay = Overlay::Panel;
+            Some(Sound::Back)
+        }
+        _ => None,
+    };
+    if let Some(sound) = sound {
+        play_sound(app, sound);
+    }
+    push_menus(ui, app);
+    sync_controllers_screen(ui, app);
+}
+
+/// Drains Controllers-screen events from the input thread.
+fn drain_controller_events(ui: &AppWindow, app: &mut App) {
+    while let Ok(event) = app.controller_events.try_recv() {
+        match event {
+            InputEvent::Pads(pads) => {
+                app.pads = pads;
+                app.pad_index = app.pad_index.min(app.pads.len().saturating_sub(1));
+            }
+            InputEvent::Live(mask) => {
+                let live: Vec<bool> = (0..controllers::ALL.len())
+                    .map(|i| mask & (1 << i) != 0)
+                    .collect();
+                ui.set_live(ModelRc::new(VecModel::from(live)));
+            }
+            InputEvent::Captured(trigger) if app.capturing => {
+                app.capturing = false;
+                let button = controllers::ALL[app.remap_selected];
+                if let Some(pad) = app.pads.get(app.pad_index).cloned() {
+                    let profile = app
+                        .home
+                        .state
+                        .controller_remaps
+                        .entry(pad.guid)
+                        .or_default();
+                    profile.name = pad.name;
+                    profile.add(button, trigger.clone());
+                    save_remaps(ui, app);
+                    app.toasts.show(
+                        ui,
+                        format!(
+                            "{} now also responds to {}",
+                            button.label(),
+                            trigger.label()
+                        ),
+                    );
+                    play_sound(app, Sound::Confirm);
+                }
+            }
+            InputEvent::CaptureTimedOut => {
+                app.capturing = false;
+                app.toasts
+                    .show(ui, "Nothing pressed: no trigger added".into());
+            }
+            _ => {}
+        }
+    }
+    sync_controllers_screen(ui, app);
+}
+
+fn save_remaps(ui: &AppWindow, app: &App) {
+    if let Ok(mut remaps) = controllers::REMAPS.write() {
+        *remaps = app.home.state.controller_remaps.clone();
+    }
+    if let Err(e) = app.home.state.save(&app.state_path) {
+        app.toasts.show(ui, e);
+    }
+}
+
+/// Streams the shown pad's buttons only while the screen is open, and pushes its contents.
+fn sync_controllers_screen(ui: &AppWindow, app: &mut App) {
+    let open = app.menus.overlay == Overlay::Controllers;
+    if !open && app.capturing {
+        app.capturing = false;
+        input::CAPTURE.store(false, Ordering::Relaxed);
+    }
+    let pad = app.pads.get(app.pad_index).filter(|_| open);
+    input::LIVE_PAD.store(pad.map_or(0, |p| p.id), Ordering::Relaxed);
+    if !open {
+        return;
+    }
+    let title = match (app.pads.get(app.pad_index), app.pads.len()) {
+        (None, _) => "No controller connected".to_string(),
+        (Some(pad), 1) => pad.name.clone(),
+        (Some(pad), n) => format!(
+            "{}  ·  {} of {n}  ·  LB / RB to switch",
+            pad.name,
+            app.pad_index + 1
+        ),
+    };
+    ui.set_controllers_title(title.into());
+    let profile = app
+        .pads
+        .get(app.pad_index)
+        .and_then(|p| app.home.state.controller_remaps.get(&p.guid));
+    let rows: Vec<RemapRow> = controllers::ALL
+        .iter()
+        .enumerate()
+        .map(|(i, button)| {
+            let (column, row) = controllers::place(i);
+            let extra = profile
+                .and_then(|p| p.extra.get(button))
+                .filter(|list| !list.is_empty());
+            RemapRow {
+                label: button.label().into(),
+                value: extra
+                    .map(|list| {
+                        list.iter()
+                            .map(|t| t.label())
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    })
+                    .unwrap_or_default()
+                    .into(),
+                column: column as i32,
+                row: row as i32,
+            }
+        })
+        .collect();
+    ui.set_remap_rows(ModelRc::new(VecModel::from(rows)));
+    ui.set_remap_index(app.remap_selected as i32);
+    ui.set_capturing(app.capturing);
+    ui.set_capture_text(
+        format!(
+            "Press a key or a pad button that should also act as {}",
+            controllers::ALL[app.remap_selected].label()
+        )
+        .into(),
+    );
 }
 
 fn report(ui: &AppWindow, app: &App, result: Result<(), String>) {

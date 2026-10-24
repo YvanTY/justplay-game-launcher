@@ -42,6 +42,105 @@ component PanelTile inherits Rectangle {
     }
 }
 
+export struct RemapRow {
+    label: string,
+    value: string,
+    column: int,
+    row: int,
+}
+
+// One button on the controller picture: blue glow when selected in the lists, white while held.
+component PadKey inherits Rectangle {
+    in property <bool> lit;
+    in property <bool> pressed;
+    in property <string> text;
+    background: pressed ? white : lit ? #2d8cff : #ffffff1f;
+    border-width: 2px;
+    border-color: lit ? #9fd0ff : #ffffff40;
+    drop-shadow-blur: lit ? 26px : 0;
+    drop-shadow-color: #2d8cffd0;
+    animate background { duration: 90ms; }
+    Text {
+        width: parent.width;
+        height: parent.height;
+        text: text;
+        color: pressed ? black : white;
+        font-size: parent.height * 0.42;
+        font-weight: 700;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+}
+
+// An Xbox-layout controller drawn in a 1000 x 640 design space; button order matches
+// controllers::ALL (left column, D-pad box, right column).
+component ControllerPicture inherits Rectangle {
+    in property <int> highlight;
+    in property <[bool]> live;
+    property <length> s: self.width / 1000;
+    Path {
+        y: 80 * s;
+        width: parent.width;
+        height: 560 * s;
+        viewbox-width: 1000;
+        viewbox-height: 560;
+        commands: "M 250 10 C 330 -10 670 -10 750 10 C 840 30 900 100 930 230 C 965 380 985 480 930 530 C 880 575 800 540 740 440 C 715 400 690 380 640 380 L 360 380 C 310 380 285 400 260 440 C 200 540 120 575 70 530 C 15 480 35 380 70 230 C 100 100 160 30 250 10 Z";
+        fill: #ffffff0f;
+        stroke: #ffffff3d;
+        stroke-width: 2px;
+    }
+
+    PadKey { x: 230 * s; y: 0; width: 150 * s; height: 34 * s; border-radius: 14 * s; text: "LT"; lit: highlight == 0; pressed: live[0]; }
+    PadKey { x: 210 * s; y: 44 * s; width: 190 * s; height: 30 * s; border-radius: 12 * s; text: "LB"; lit: highlight == 1; pressed: live[1]; }
+    PadKey { x: 424 * s; y: 300 * s; width: 32 * s; height: 32 * s; border-radius: 16 * s; text: ""; lit: highlight == 2; pressed: live[2]; }
+    PadKey { x: 544 * s; y: 300 * s; width: 32 * s; height: 32 * s; border-radius: 16 * s; text: ""; lit: highlight == 3; pressed: live[3]; }
+    PadKey { x: 468 * s; y: 196 * s; width: 64 * s; height: 64 * s; border-radius: 32 * s; text: ""; lit: highlight == 4; pressed: live[4]; }
+    PadKey { x: 242 * s; y: 232 * s; width: 116 * s; height: 116 * s; border-radius: 58 * s; text: "L3"; lit: highlight == 5; pressed: live[5]; }
+    PadKey { x: 372 * s; y: 388 * s; width: 36 * s; height: 42 * s; border-radius: 6 * s; text: ""; lit: highlight == 6; pressed: live[6]; }
+    PadKey { x: 328 * s; y: 430 * s; width: 44 * s; height: 36 * s; border-radius: 6 * s; text: ""; lit: highlight == 7; pressed: live[7]; }
+    PadKey { x: 408 * s; y: 430 * s; width: 44 * s; height: 36 * s; border-radius: 6 * s; text: ""; lit: highlight == 8; pressed: live[8]; }
+    PadKey { x: 372 * s; y: 466 * s; width: 36 * s; height: 42 * s; border-radius: 6 * s; text: ""; lit: highlight == 9; pressed: live[9]; }
+    PadKey { x: 620 * s; y: 0; width: 150 * s; height: 34 * s; border-radius: 14 * s; text: "RT"; lit: highlight == 10; pressed: live[10]; }
+    PadKey { x: 600 * s; y: 44 * s; width: 190 * s; height: 30 * s; border-radius: 12 * s; text: "RB"; lit: highlight == 11; pressed: live[11]; }
+    PadKey { x: 690 * s; y: 200 * s; width: 60 * s; height: 60 * s; border-radius: 30 * s; text: "Y"; lit: highlight == 12; pressed: live[12]; }
+    PadKey { x: 630 * s; y: 260 * s; width: 60 * s; height: 60 * s; border-radius: 30 * s; text: "X"; lit: highlight == 13; pressed: live[13]; }
+    PadKey { x: 750 * s; y: 260 * s; width: 60 * s; height: 60 * s; border-radius: 30 * s; text: "B"; lit: highlight == 14; pressed: live[14]; }
+    PadKey { x: 690 * s; y: 320 * s; width: 60 * s; height: 60 * s; border-radius: 30 * s; text: "A"; lit: highlight == 15; pressed: live[15]; }
+    PadKey { x: 562 * s; y: 392 * s; width: 116 * s; height: 116 * s; border-radius: 58 * s; text: "R3"; lit: highlight == 16; pressed: live[16]; }
+}
+
+component RemapRowView inherits Rectangle {
+    in property <RemapRow> data;
+    in property <bool> selected;
+    in property <bool> pressed;
+    in property <length> u;
+    border-radius: 14 * u;
+    background: selected ? #2d8cff33 : pressed ? #ffffff1f : #ffffff08;
+    border-width: selected ? 2px : 0;
+    border-color: #2d8cff;
+    animate background { duration: 90ms; }
+    VerticalLayout {
+        padding-left: 20 * u;
+        padding-right: 20 * u;
+        alignment: center;
+        spacing: 2 * u;
+        Text {
+            text: data.label;
+            font-size: 22 * u;
+            font-weight: selected ? 600 : 400;
+            color: white;
+            overflow: elide;
+        }
+
+        Text {
+            text: data.value == "" ? "No extra trigger" : "+ " + data.value;
+            font-size: 18 * u;
+            color: data.value == "" ? #ffffff59 : #8cc4ff;
+            overflow: elide;
+        }
+    }
+}
+
 export struct TabInfo {
     name: string,
     count: int,
@@ -191,12 +290,21 @@ export component AppWindow inherits Window {
     in property <int> power-index;
     in property <int> settings-index;
     in property <[string]> settings-values;
+
+    in property <string> controllers-title;
+    in property <[RemapRow]> remap-rows;
+    in property <int> remap-index;
+    in property <[bool]> live;
+    in property <bool> capturing;
+    in property <string> capture-text;
     in property <string> toast;
     in property <bool> toast-visible;
 
     callback action(Action);
     callback notify(string);
     callback home-combo();
+    // Controllers-screen data waits in a channel; this tells the app to read it.
+    callback controller-event();
     // Empty message: the game ended normally; otherwise why it failed.
     callback game-ended(string);
 
@@ -658,11 +766,119 @@ export component AppWindow inherits Window {
         }
     }
 
+    // --- Controllers screen ---
+    if overlay == 4: Rectangle {
+        property <length> column-w: 470 * u;
+        property <length> picture-x: margin + column-w + 50 * u;
+        property <length> picture-w: root.width - 2 * picture-x;
+        property <length> picture-y: 190 * u;
+        background: #0a0f18;
+        Text {
+            x: margin;
+            y: 44 * u;
+            text: "Controllers";
+            font-size: 40 * u;
+            font-weight: 600;
+            color: white;
+        }
+
+        Text {
+            x: margin;
+            y: 100 * u;
+            text: controllers-title;
+            font-size: 24 * u;
+            font-weight: 300;
+            color: #ffffffb3;
+        }
+
+        ControllerPicture {
+            x: picture-x;
+            y: picture-y;
+            width: picture-w;
+            height: picture-w * 0.64;
+            highlight: remap-index;
+            live: live;
+        }
+
+        for row[i] in remap-rows: RemapRowView {
+            data: row;
+            selected: i == remap-index;
+            pressed: live[i];
+            u: u;
+            width: column-w;
+            height: 72 * u;
+            x: row.column == 0 ? margin : row.column == 2 ? root.width - margin - column-w : (root.width - column-w) / 2;
+            y: row.column == 1 ? picture-y + picture-w * 0.64 + 24 * u + row.row * 80 * u : 190 * u + row.row * 84 * u;
+        }
+
+        HorizontalLayout {
+            x: margin;
+            y: root.height - 60 * u;
+            width: root.width - 2 * margin;
+            height: 34 * u;
+            alignment: end;
+            spacing: 32 * u;
+            ButtonHint {
+                key: "A";
+                label: "Add key or button";
+                u: u;
+            }
+
+            ButtonHint {
+                key: "Y";
+                label: "Clear";
+                u: u;
+            }
+
+            ButtonHint {
+                key: "B";
+                label: "Back";
+                u: u;
+            }
+        }
+
+        if capturing: Rectangle {
+            background: #000000b0;
+            Rectangle {
+                x: (parent.width - self.width) / 2;
+                y: (parent.height - self.height) / 2;
+                width: 980 * u;
+                height: 220 * u;
+                border-radius: 24 * u;
+                background: #121a2bfa;
+                border-width: 2px;
+                border-color: #2d8cff;
+                drop-shadow-blur: 50 * u;
+                drop-shadow-color: #2d8cff60;
+                VerticalLayout {
+                    alignment: center;
+                    spacing: 14 * u;
+                    padding: 30 * u;
+                    Text {
+                        text: capture-text;
+                        font-size: 30 * u;
+                        color: white;
+                        wrap: word-wrap;
+                        horizontal-alignment: center;
+                    }
+
+                    Text {
+                        text: "Waiting a few seconds… press nothing to cancel";
+                        font-size: 20 * u;
+                        color: #ffffff80;
+                        horizontal-alignment: center;
+                    }
+                }
+            }
+        }
+    }
+
     // Messages sit in the empty band between the game row and the title, clear of every row.
     Rectangle {
         // Beside the quick panel while it is open, so messages never cover its tiles.
         x: (overlay == 1 || overlay == 2 ? root.width - 620 * u : root.width) - margin - self.width;
-        y: 320 * u;
+        // The Controllers screen fills the band below the header, so messages use the header's corner there.
+        y: overlay == 4 ? 44 * u : 320 * u;
         width: min(toast-text.preferred-width + 60 * u, root.width - 2 * margin);
         height: 60 * u;
         border-radius: self.height / 2;

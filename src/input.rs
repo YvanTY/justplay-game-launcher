@@ -3,12 +3,13 @@
 
 use std::collections::{HashMap, HashSet};
 use std::ffi::{CStr, CString, c_char};
-use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, Ordering};
 use std::time::{Duration, Instant};
 
 use sdl3_sys::everything::*;
 
 use crate::Action;
+use crate::controllers::{self, REMAPS, Trigger, XButton};
 use crate::diag;
 use crate::emulation::{self, Translate, VirtualPad};
 
@@ -17,7 +18,30 @@ pub enum InputEvent {
     Notice(String),
     /// Start + Select held: bring the launcher back over (or send it behind) a running game.
     HomeCombo,
+    /// The connected controllers changed (for the Controllers screen).
+    Pads(Vec<PadInfo>),
+    /// Buttons currently held on the pad shown in the Controllers screen (bit i = controllers::ALL[i]).
+    Live(u32),
+    /// The key or button pressed while the Controllers screen was waiting for one.
+    Captured(Trigger),
+    /// Nothing was pressed in time; the screen stops waiting.
+    CaptureTimedOut,
 }
+
+#[derive(Clone, Debug)]
+pub struct PadInfo {
+    pub id: u32,
+    pub name: String,
+    /// SDL's GUID string: the same for every pad of one model, used to key its remaps.
+    pub guid: String,
+}
+
+/// SDL id of the pad shown in the Controllers screen (0 = screen closed): its buttons are streamed live.
+pub static LIVE_PAD: AtomicU32 = AtomicU32::new(0);
+/// Set while the Controllers screen waits for a key or button to add as an extra trigger.
+pub static CAPTURE: AtomicBool = AtomicBool::new(false);
+const TRIGGER_DOWN: i16 = 16_000;
+const CAPTURE_TIMEOUT: Duration = Duration::from_secs(6);
 
 /// Set while a game runs: the pads are then only watched for the home combo, so polling slows down.
 pub static IN_GAME: AtomicBool = AtomicBool::new(false);
@@ -106,6 +130,11 @@ fn run(emit: impl Fn(InputEvent)) {
         emulation_failed: false,
         own_pads: HashSet::new(),
         last_emulation_error: String::new(),
+        guids: HashMap::new(),
+        live_mask: 0,
+        capture_keys: None,
+        capture_mask: 0,
+        capture_started: Instant::now(),
     };
     let mut event = SDL_Event::default();
     // SDL_WaitEvent re-polls open pads every ~1 ms, which costs real CPU with chatty
@@ -116,6 +145,7 @@ fn run(emit: impl Fn(InputEvent)) {
         }
         pads.repeat_if_due();
         pads.update_emulation();
+        pads.update_live_and_capture();
         // Gameplay through the virtual pad needs full-rate polling; otherwise a game only
         // needs the home combo watched.
         let interval = if IN_GAME.load(Ordering::Relaxed) && pads.virtual_pads.is_empty() {
@@ -164,6 +194,14 @@ struct Pads<F: Fn(InputEvent)> {
     /// (otherwise every press, including the home combo, would arrive twice).
     own_pads: HashSet<u32>,
     last_emulation_error: String,
+    /// SDL GUID string per opened gamepad, to find its remap profile.
+    guids: HashMap<u32, String>,
+    live_mask: u32,
+    /// Keys already held when capture started (only new presses count).
+    capture_keys: Option<HashSet<u16>>,
+    /// Buttons already held when capture started.
+    capture_mask: u32,
+    capture_started: Instant,
 }
 
 #[derive(Default)]
@@ -196,6 +234,8 @@ impl<F: Fn(InputEvent)> Pads<F> {
                     ));
                 } else {
                     self.gamepads.insert(id.0, pad);
+                    self.guids
+                        .insert(id.0, guid_string(unsafe { SDL_GetGamepadGUIDForID(id) }));
                     let name = cstr(unsafe { SDL_GetGamepadName(pad) });
                     let mapping = unsafe { SDL_GetGamepadMapping(pad) };
                     diag::log(&format!(
@@ -210,6 +250,7 @@ impl<F: Fn(InputEvent)> Pads<F> {
                     if !(xbox && !self.virtual_pads.is_empty()) {
                         self.notice(format!("{name} connected"));
                     }
+                    self.emit_pads();
                 }
             }
             SDL_EVENT_GAMEPAD_REMOVED => {
@@ -220,7 +261,9 @@ impl<F: Fn(InputEvent)> Pads<F> {
                 if let Some(pad) = self.gamepads.remove(&id) {
                     unsafe { SDL_CloseGamepad(pad) };
                     self.forget_device(id);
+                    self.guids.remove(&id);
                     self.notice("Controller disconnected".into());
+                    self.emit_pads();
                 }
             }
             SDL_EVENT_GAMEPAD_BUTTON_DOWN | SDL_EVENT_GAMEPAD_BUTTON_UP => {
@@ -485,10 +528,14 @@ impl<F: Fn(InputEvent)> Pads<F> {
                 continue;
             };
             let report = if playing {
-                emulation::report(
+                let mut report = emulation::report(
                     |button| unsafe { SDL_GetGamepadButton(source, button) },
                     |axis| unsafe { SDL_GetGamepadAxis(source, axis) },
-                )
+                );
+                if let Some(guid) = self.guids.get(&id) {
+                    apply_remaps(&mut report, guid, source);
+                }
+                report
             } else {
                 emulation::report(|_| false, |_| 0)
             };
@@ -538,9 +585,78 @@ impl<F: Fn(InputEvent)> Pads<F> {
             }
             self.forget_device(id);
             self.own_pads.insert(id);
+            self.guids.remove(&id);
+            self.emit_pads();
             diag::log(&format!(
                 "pad {id} is one of the launcher's own virtual Xbox pads; closed"
             ));
+        }
+    }
+
+    fn emit_pads(&self) {
+        let mut pads: Vec<PadInfo> = self
+            .gamepads
+            .iter()
+            .filter(|(id, _)| !self.own_pads.contains(id))
+            .map(|(&id, &pad)| PadInfo {
+                id,
+                name: cstr(unsafe { SDL_GetGamepadName(pad) }),
+                guid: self.guids.get(&id).cloned().unwrap_or_default(),
+            })
+            .collect();
+        pads.sort_by_key(|pad| pad.id);
+        (self.emit)(InputEvent::Pads(pads));
+    }
+
+    /// Streams the Controllers screen pad's buttons and, while capturing, reports the first
+    /// newly pressed key or button.
+    fn update_live_and_capture(&mut self) {
+        let live_id = LIVE_PAD.load(Ordering::Relaxed);
+        let mask = self.gamepads.get(&live_id).map_or(0, |&pad| held_mask(pad));
+        if mask != self.live_mask {
+            self.live_mask = mask;
+            (self.emit)(InputEvent::Live(mask));
+        }
+        if !CAPTURE.load(Ordering::Relaxed) {
+            self.capture_keys = None;
+            return;
+        }
+        let Some(baseline) = &self.capture_keys else {
+            self.capture_keys = Some(held_keys());
+            self.capture_mask = mask;
+            self.capture_started = Instant::now();
+            return;
+        };
+        if self.capture_started.elapsed() > CAPTURE_TIMEOUT {
+            CAPTURE.store(false, Ordering::Relaxed);
+            self.capture_keys = None;
+            (self.emit)(InputEvent::CaptureTimedOut);
+            return;
+        }
+        let new_button = mask & !self.capture_mask;
+        let captured = if new_button != 0 {
+            Some(Trigger::Button {
+                button: controllers::ALL[new_button.trailing_zeros() as usize],
+            })
+        } else {
+            pressed_keys()
+                .into_iter()
+                .find(|vk| !baseline.contains(vk))
+                .map(|vk| Trigger::Key {
+                    vk,
+                    name: controllers::key_name(vk),
+                })
+        };
+        // Releasing a key held at the start makes it eligible again.
+        let still_held = held_keys();
+        if let Some(baseline) = self.capture_keys.as_mut() {
+            baseline.retain(|vk| still_held.contains(vk));
+        }
+        self.capture_mask &= mask;
+        if let Some(trigger) = captured {
+            CAPTURE.store(false, Ordering::Relaxed);
+            self.capture_keys = None;
+            (self.emit)(InputEvent::Captured(trigger));
         }
     }
 
@@ -648,6 +764,77 @@ fn stick_direction(x: i32, y: i32, threshold: i32) -> Option<Action> {
     } else {
         None
     }
+}
+
+/// Bit i set when controllers::ALL[i] is held on `pad` (triggers count past half travel).
+fn held_mask(pad: *mut SDL_Gamepad) -> u32 {
+    controllers::ALL
+        .iter()
+        .enumerate()
+        .fold(0, |mask, (i, button)| {
+            let held = match (button.sdl_button(), button.trigger_axis()) {
+                (Some(b), _) => unsafe { SDL_GetGamepadButton(pad, b) },
+                (_, Some(axis)) => (unsafe { SDL_GetGamepadAxis(pad, axis) }) > TRIGGER_DOWN,
+                _ => false,
+            };
+            if held { mask | (1 << i) } else { mask }
+        })
+}
+
+/// Keyboard keys currently down. Mouse buttons and the generic Shift/Ctrl/Alt codes are skipped
+/// (their left/right variants are reported instead).
+fn held_keys() -> HashSet<u16> {
+    keys_matching(|state| state < 0)
+}
+
+/// Keys held now or tapped since the last check. Windows' "pressed since last call" bit catches
+/// taps shorter than the poll interval; it is shared between apps, so it only ever adds presses.
+fn pressed_keys() -> HashSet<u16> {
+    keys_matching(|state| state < 0 || state & 1 != 0)
+}
+
+fn keys_matching(pressed: impl Fn(i16) -> bool) -> HashSet<u16> {
+    use windows_sys::Win32::UI::Input::KeyboardAndMouse::GetAsyncKeyState;
+    (0x08u16..=0xFE)
+        .filter(|vk| !matches!(vk, 0x10..=0x12))
+        .filter(|&vk| pressed(unsafe { GetAsyncKeyState(vk as i32) }))
+        .collect()
+}
+
+/// Presses the buttons whose extra triggers (keyboard keys or other pad buttons) are held.
+fn apply_remaps(report: &mut vigem_client::XGamepad, guid: &str, source: *mut SDL_Gamepad) {
+    use windows_sys::Win32::UI::Input::KeyboardAndMouse::GetAsyncKeyState;
+    let Ok(remaps) = REMAPS.read() else { return };
+    let Some(profile) = remaps.get(guid) else {
+        return;
+    };
+    let source_held = held_mask(source);
+    for (button, triggers) in &profile.extra {
+        let active = triggers.iter().any(|trigger| match trigger {
+            Trigger::Key { vk, .. } => (unsafe { GetAsyncKeyState(*vk as i32) }) < 0,
+            Trigger::Button { button } => {
+                let index = controllers::ALL
+                    .iter()
+                    .position(|b| b == button)
+                    .unwrap_or(0);
+                source_held & (1 << index) != 0
+            }
+        });
+        if !active {
+            continue;
+        }
+        match (button.xinput_flag(), button) {
+            (Some(flag), _) => report.buttons.raw |= flag,
+            (None, XButton::Lt) => report.left_trigger = u8::MAX,
+            (None, _) => report.right_trigger = u8::MAX,
+        }
+    }
+}
+
+fn guid_string(guid: SDL_GUID) -> String {
+    let mut buffer = [0 as c_char; 33];
+    unsafe { SDL_GUIDToString(guid, buffer.as_mut_ptr(), buffer.len() as i32) };
+    cstr(buffer.as_ptr())
 }
 
 fn sdl_error() -> String {

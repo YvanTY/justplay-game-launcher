@@ -15,6 +15,8 @@ pub struct State {
     /// Per-game controller translation chosen in the game's menu (absent = default).
     pub controller_modes: HashMap<String, ControllerMode>,
     pub settings: Settings,
+    /// Extra triggers per controller model (SDL GUID), from the Controllers screen.
+    pub controller_remaps: HashMap<String, crate::controllers::Profile>,
 }
 
 /// User preferences from the Settings page. Volumes are percentages in steps of 10.
