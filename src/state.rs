@@ -14,6 +14,31 @@ pub struct State {
     pub last_played: HashMap<String, u64>,
     /// Per-game controller translation chosen in the game's menu (absent = default).
     pub controller_modes: HashMap<String, ControllerMode>,
+    pub settings: Settings,
+}
+
+/// User preferences from the Settings page. Volumes are percentages in steps of 10.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Settings {
+    pub sound_volume: u8,
+    pub music_volume: u8,
+}
+
+impl Default for Settings {
+    fn default() -> Settings {
+        Settings {
+            sound_volume: 80,
+            music_volume: 60,
+        }
+    }
+}
+
+impl Settings {
+    /// Steps a volume by 10 points, clamped to 0-100.
+    pub fn step(value: u8, delta: i32) -> u8 {
+        (value as i32 + delta * 10).clamp(0, 100) as u8
+    }
 }
 
 /// How a PC game receives pads that aren't Xbox pads.
@@ -159,6 +184,17 @@ mod tests {
             ControllerMode::PlaystationNative
         );
         assert_eq!(ControllerMode::Off.next(), ControllerMode::Xbox);
+    }
+
+    #[test]
+    fn settings_default_and_clamp() {
+        assert_eq!(Settings::default().sound_volume, 80);
+        assert_eq!(Settings::step(95, 1), 100);
+        assert_eq!(Settings::step(0, -1), 0);
+        assert_eq!(Settings::step(60, -1), 50);
+        // Older state files without a settings section still load with defaults.
+        let state: State = serde_json::from_str(r#"{"favorites": []}"#).unwrap();
+        assert_eq!(state.settings, Settings::default());
     }
 
     #[test]

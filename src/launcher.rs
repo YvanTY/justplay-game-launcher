@@ -199,6 +199,36 @@ pub fn trim_memory() {
     unsafe { SetProcessWorkingSetSize(GetCurrentProcess(), usize::MAX, usize::MAX) };
 }
 
+pub fn sleep() -> Result<(), String> {
+    use windows_sys::Win32::System::Power::SetSuspendState;
+    // Sleep (not hibernate), let wake timers and devices wake the PC as usual.
+    if unsafe { SetSuspendState(false, false, false) } {
+        Ok(())
+    } else {
+        Err(format!("Sleep failed: {}", std::io::Error::last_os_error()))
+    }
+}
+
+/// Restart or shut down through Windows' own shutdown.exe, which applications are expected to use.
+pub fn restart() -> Result<(), String> {
+    run_shutdown("/r")
+}
+
+pub fn shut_down() -> Result<(), String> {
+    run_shutdown("/s")
+}
+
+fn run_shutdown(mode: &str) -> Result<(), String> {
+    let exe = PathBuf::from(std::env::var_os("WINDIR").unwrap_or_else(|| "C:\\Windows".into()))
+        .join("System32")
+        .join("shutdown.exe");
+    Command::new(exe)
+        .args([mode, "/t", "0"])
+        .spawn()
+        .map(|_| ())
+        .map_err(|e| format!("Could not run shutdown: {e}"))
+}
+
 /// Process ids whose executable lives inside `dir` (excluding the launcher itself).
 fn processes_in(dir: &Path) -> Vec<u32> {
     let own = std::process::id();

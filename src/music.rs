@@ -6,7 +6,7 @@
 use std::fs::File;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::time::{Duration, Instant};
 
@@ -19,8 +19,14 @@ use symphonia::core::meta::MetadataOptions;
 
 use crate::diag;
 
-/// Background music sits well under the UI sounds.
-const VOLUME: f32 = 0.45;
+/// Gain at 100% on the Settings page; the default 60% keeps music well under the UI sounds.
+const MAX_VOLUME: f32 = 0.75;
+/// Current music gain as f32 bits, shared with the music thread.
+static VOLUME: AtomicU32 = AtomicU32::new(0x3EE6_6666); // 0.45
+
+fn volume() -> f32 {
+    f32::from_bits(VOLUME.load(Ordering::Relaxed))
+}
 /// Resting on a game this long before its music starts, so scrolling past games stays quiet.
 const START_DELAY: Duration = Duration::from_millis(700);
 const FADE_IN: Duration = Duration::from_millis(1200);
@@ -53,6 +59,13 @@ impl Music {
     /// Switches to `path` (fading), or fades out to silence with `None`.
     pub fn play(&self, path: Option<PathBuf>) {
         let _ = self.commands.send(path);
+    }
+
+    pub fn set_volume(&self, percent: u8) {
+        VOLUME.store(
+            (MAX_VOLUME * percent as f32 / 100.0).to_bits(),
+            Ordering::Relaxed,
+        );
     }
 
     pub fn is_playing(&self) -> bool {
@@ -184,7 +197,7 @@ fn open_decoder(path: &Path) -> Result<Decoding, String> {
 /// Keeps about BUFFER_AHEAD of audio queued; loops the file at its end.
 fn feed(track: &mut Track, device: SDL_AudioDeviceID) -> Result<(), String> {
     if !track.stream.is_null() {
-        unsafe { SDL_SetAudioStreamGain(track.stream, track.gain * VOLUME) };
+        unsafe { SDL_SetAudioStreamGain(track.stream, track.gain * volume()) };
     }
     loop {
         if !track.stream.is_null() {
@@ -231,7 +244,7 @@ fn feed(track: &mut Track, device: SDL_AudioDeviceID) -> Result<(), String> {
                     "could not open an audio stream for music: {reason}"
                 ));
             }
-            unsafe { SDL_SetAudioStreamGain(stream, track.gain * VOLUME) };
+            unsafe { SDL_SetAudioStreamGain(stream, track.gain * volume()) };
             track.stream = stream;
             track.bytes_per_second = spec.rate() as usize * channels * size_of::<f32>();
         }

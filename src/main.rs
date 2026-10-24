@@ -9,6 +9,7 @@ mod home;
 mod input;
 mod launcher;
 mod library;
+mod menus;
 mod music;
 mod nav;
 mod state;
@@ -28,6 +29,7 @@ use home::{Effect, Home, NavState, SheetItem};
 use input::InputEvent;
 use launcher::{Ended, Running};
 use library::{Game, Library};
+use menus::{MenuEffect, Menus, Overlay, Setting};
 use music::Music;
 use state::{ControllerMode, State};
 
@@ -49,6 +51,7 @@ struct App {
     running: Option<Running>,
     /// True while the launcher is hidden behind a running game.
     in_background: bool,
+    menus: Menus,
     /// None when the PC has no usable audio output; the launcher works silently then.
     audio: Option<Rc<Audio>>,
     music: Option<Rc<Music>>,
@@ -103,6 +106,7 @@ fn main() -> Result<(), slint::PlatformError> {
         clock_timer: Timer::default(),
         running: None,
         in_background: false,
+        menus: Menus::new(),
         audio,
         music,
         audio_timer: Timer::default(),
@@ -110,6 +114,8 @@ fn main() -> Result<(), slint::PlatformError> {
 
     {
         let mut app = app.borrow_mut();
+        apply_volumes(&app);
+        push_menus(&ui, &app);
         push_tabs(&ui, &mut app);
         push_selection(&ui, &mut app);
         push_scalars(&ui, &app.home);
@@ -139,9 +145,8 @@ fn main() -> Result<(), slint::PlatformError> {
             if app.borrow().in_background {
                 return;
             }
-            if action == Action::Menu {
-                let toasts = app.borrow().toasts.clone();
-                toasts.show(&ui, "The quick panel arrives in step 6".into());
+            if action == Action::Menu || app.borrow().menus.is_open() {
+                handle_menu_action(&ui, &mut app.borrow_mut(), action);
                 return;
             }
             let before = app.borrow().home.nav_state();
@@ -713,6 +718,165 @@ impl Toasts {
                     toasts.next(&ui);
                 }
             });
+    }
+}
+
+/// Quick panel, Power and Settings: navigation, then whatever the chosen item does.
+fn handle_menu_action(ui: &AppWindow, app: &mut App, action: Action) {
+    let snapshot = |m: &Menus| (m.overlay, m.panel_focus, m.power_focus, m.settings_focus);
+    let before = snapshot(&app.menus);
+    let effects = app.menus.handle(action);
+    let after = snapshot(&app.menus);
+    let navigation = matches!(
+        action,
+        Action::Up | Action::Down | Action::Left | Action::Right
+    );
+    let sound = if before.0 != after.0 {
+        Some(if after.0 == Overlay::None || action == Action::Back {
+            Sound::Back
+        } else {
+            Sound::Confirm
+        })
+    } else if before != after || !effects.is_empty() {
+        Some(Sound::Move)
+    } else {
+        navigation.then_some(Sound::Bump)
+    };
+    if let Some(sound) = sound {
+        play_sound(app, sound);
+    }
+    for effect in effects {
+        match effect {
+            MenuEffect::Rescan => rescan(ui, app),
+            MenuEffect::Exit => {
+                let _ = slint::quit_event_loop();
+            }
+            MenuEffect::Sleep => report(ui, app, launcher::sleep()),
+            MenuEffect::Restart => report(ui, app, launcher::restart()),
+            MenuEffect::ShutDown => report(ui, app, launcher::shut_down()),
+            MenuEffect::Adjust(setting, delta) => {
+                let settings = &mut app.home.state.settings;
+                match setting {
+                    Setting::SoundVolume => {
+                        settings.sound_volume = state::Settings::step(settings.sound_volume, delta)
+                    }
+                    Setting::MusicVolume => {
+                        settings.music_volume = state::Settings::step(settings.music_volume, delta)
+                    }
+                }
+                apply_volumes(app);
+                if let Err(e) = app.home.state.save(&app.state_path) {
+                    app.toasts.show(ui, e);
+                }
+            }
+        }
+    }
+    push_menus(ui, app);
+}
+
+fn report(ui: &AppWindow, app: &App, result: Result<(), String>) {
+    if let Err(e) = result {
+        diag::log(&e);
+        app.toasts.show(ui, e);
+    }
+}
+
+fn apply_volumes(app: &App) {
+    let settings = app.home.state.settings;
+    if let Some(audio) = &app.audio {
+        audio.set_volume(settings.sound_volume);
+    }
+    if let Some(music) = &app.music {
+        music.set_volume(settings.music_volume);
+    }
+}
+
+fn push_menus(ui: &AppWindow, app: &App) {
+    let menus = &app.menus;
+    ui.set_overlay(match menus.overlay {
+        Overlay::None => 0,
+        Overlay::Panel => 1,
+        Overlay::Power => 2,
+        Overlay::Settings => 3,
+        Overlay::Controllers => 4,
+    });
+    ui.set_panel_index(menus.panel_focus as i32);
+    ui.set_power_index(menus.power_focus as i32);
+    ui.set_settings_index(menus.settings_focus as i32);
+    let settings = app.home.state.settings;
+    let values: Vec<SharedString> = menus::SETTINGS
+        .iter()
+        .map(|setting| match setting {
+            Setting::SoundVolume => format!("{}%", settings.sound_volume).into(),
+            Setting::MusicVolume => format!("{}%", settings.music_volume).into(),
+        })
+        .collect();
+    ui.set_settings_values(ModelRc::new(VecModel::from(values)));
+    if menus.is_open() {
+        ui.set_date(local_date().into());
+    }
+}
+
+/// Re-reads config.toml and the emulator libraries without restarting the launcher.
+fn rescan(ui: &AppWindow, app: &mut App) {
+    if app.home.running.is_some() {
+        app.toasts
+            .show(ui, "Close the running game before rescanning".into());
+        return;
+    }
+    let data_dir = config::data_dir();
+    let config = match config::load(&data_dir) {
+        Ok(config) => config,
+        Err(e) => {
+            diag::log(&e);
+            app.toasts.show(ui, e);
+            return;
+        }
+    };
+    let library = library::load(&config, &data_dir.join("art"));
+    for warning in &library.warnings {
+        diag::log(warning);
+    }
+    let count = library.games.len();
+    let state = std::mem::take(&mut app.home.state);
+    app.home = Home::new(library.games, state);
+    app.shown_hero = None;
+    push_tabs(ui, app);
+    push_selection(ui, app);
+    push_scalars(ui, &app.home);
+    show_hero(ui, app);
+    update_music(app);
+    app.toasts
+        .show(ui, format!("Library rescanned: {count} games"));
+    if let Some(first) = library.warnings.first() {
+        let more = if library.warnings.len() > 1 {
+            format!(" (+{} more)", library.warnings.len() - 1)
+        } else {
+            String::new()
+        };
+        app.toasts.show(ui, format!("{first}{more}"));
+    }
+}
+
+/// Today's date in the user's long Windows date format.
+fn local_date() -> String {
+    use windows_sys::Win32::Globalization::{DATE_LONGDATE, GetDateFormatEx};
+    let mut buffer = [0u16; 128];
+    let len = unsafe {
+        GetDateFormatEx(
+            std::ptr::null(),
+            DATE_LONGDATE,
+            std::ptr::null(),
+            std::ptr::null(),
+            buffer.as_mut_ptr(),
+            buffer.len() as i32,
+            std::ptr::null(),
+        )
+    };
+    if len <= 1 {
+        String::new()
+    } else {
+        String::from_utf16_lossy(&buffer[..len as usize - 1])
     }
 }
 

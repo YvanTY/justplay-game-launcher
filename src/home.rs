@@ -126,23 +126,25 @@ impl Home {
         } else {
             vec![SheetItem::Play]
         };
-        if self.games[game].xinput {
-            items.push(SheetItem::ControllerMode);
-        }
         items.push(SheetItem::ToggleFavorite);
+        // Last, so the other items keep their positions whatever the game.
+        items.push(SheetItem::ControllerMode);
         items
     }
 
-    /// Games whose config disables translation (emulators) are always Off.
+    /// The mode chosen in the game's menu, else the default: Xbox for PC games, Off for
+    /// emulator games (emulators read pads directly unless told otherwise).
     pub fn controller_mode(&self, game: usize) -> ControllerMode {
-        if !self.games[game].xinput {
-            return ControllerMode::Off;
-        }
+        let default = if self.games[game].xinput {
+            ControllerMode::Xbox
+        } else {
+            ControllerMode::Off
+        };
         self.state
             .controller_modes
             .get(&self.games[game].id)
             .copied()
-            .unwrap_or_default()
+            .unwrap_or(default)
     }
 
     /// Playing the game that is already running just brings it back.
@@ -536,7 +538,8 @@ mod tests {
             [
                 SheetItem::Resume,
                 SheetItem::CloseGame,
-                SheetItem::ToggleFavorite
+                SheetItem::ToggleFavorite,
+                SheetItem::ControllerMode
             ]
         );
         home.handle(Action::Down);
@@ -589,7 +592,7 @@ mod tests {
     }
 
     #[test]
-    fn controller_mode_cycles_in_the_sheet_for_pc_games_only() {
+    fn controller_mode_line_cycles_and_defaults_by_game_kind() {
         let mut games = sample();
         games[1].xinput = true; // a PC game
         let mut home = Home::new(games, State::default());
@@ -599,10 +602,11 @@ mod tests {
             home.sheet_items(),
             [
                 SheetItem::Play,
-                SheetItem::ControllerMode,
-                SheetItem::ToggleFavorite
+                SheetItem::ToggleFavorite,
+                SheetItem::ControllerMode
             ]
         );
+        home.handle(Action::Down);
         home.handle(Action::Down);
         assert_eq!(
             home.handle(Action::Confirm),
@@ -613,8 +617,12 @@ mod tests {
             "sheet stays open to show the new mode"
         );
         assert_eq!(home.controller_mode(1), ControllerMode::PlaystationNative);
-        // A PS3 game (translation disabled in config) has no controller line and is always Off.
+        // Emulator games default to Off but can be switched on like any other game.
         assert_eq!(home.controller_mode(0), ControllerMode::Off);
+        home.state
+            .controller_modes
+            .insert("ps3:BLUS30405".into(), ControllerMode::Xbox);
+        assert_eq!(home.controller_mode(0), ControllerMode::Xbox);
     }
 
     #[test]

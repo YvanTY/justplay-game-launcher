@@ -11,7 +11,8 @@ use sdl3_sys::everything::*;
 
 const RATE: usize = 48_000;
 const CHANNELS: usize = 2;
-const VOLUME: f32 = 0.55;
+/// Gain at 100% on the Settings page (80% gives the original 0.55).
+const MAX_VOLUME: f32 = 0.7;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Sound {
@@ -98,6 +99,12 @@ impl Audio {
         unsafe { SDL_ResumeAudioDevice(self.device) };
     }
 
+    pub fn set_volume(&self, percent: u8) {
+        if let Ok(mut mixer) = self.mixer.lock() {
+            mixer.volume = MAX_VOLUME * percent as f32 / 100.0;
+        }
+    }
+
     /// The device the UI sounds play on; music streams bind to it too.
     pub fn device(&self) -> SDL_AudioDeviceID {
         self.device
@@ -146,10 +153,20 @@ struct Voice {
     position: usize,
 }
 
-#[derive(Default)]
 struct Mixer {
     voices: Vec<Voice>,
     scratch: Vec<f32>,
+    volume: f32,
+}
+
+impl Default for Mixer {
+    fn default() -> Mixer {
+        Mixer {
+            voices: Vec::new(),
+            scratch: Vec::new(),
+            volume: MAX_VOLUME * 0.8,
+        }
+    }
 }
 
 impl Mixer {
@@ -160,7 +177,7 @@ impl Mixer {
             let remaining = &voice.samples[voice.position..];
             let count = remaining.len().min(self.scratch.len());
             for (out, sample) in self.scratch.iter_mut().zip(&remaining[..count]) {
-                *out += sample * VOLUME;
+                *out += sample * self.volume;
             }
             voice.position += count;
         }

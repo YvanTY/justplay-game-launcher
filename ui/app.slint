@@ -9,6 +9,39 @@ export struct Tile {
     has-icon: bool,
 }
 
+// A quick-panel tile: big glyph above a label (BuzzTV-style square buttons).
+component PanelTile inherits Rectangle {
+    in property <string> glyph;
+    in property <string> label;
+    in property <bool> focused;
+    in property <length> u;
+    border-radius: 20 * u;
+    background: focused ? #2d8cff : #ffffff12;
+    border-width: focused ? 0 : 1px;
+    border-color: #ffffff1a;
+    drop-shadow-blur: focused ? 28 * u : 0;
+    drop-shadow-color: #2d8cff80;
+    animate background { duration: 120ms; }
+    VerticalLayout {
+        alignment: center;
+        spacing: 14 * u;
+        Text {
+            text: glyph;
+            font-family: "Segoe MDL2 Assets";
+            font-size: 46 * u;
+            color: white;
+            horizontal-alignment: center;
+        }
+
+        Text {
+            text: label;
+            font-size: 24 * u;
+            color: white;
+            horizontal-alignment: center;
+        }
+    }
+}
+
 export struct TabInfo {
     name: string,
     count: int,
@@ -150,6 +183,14 @@ export component AppWindow inherits Window {
     in property <int> sheet-index;
 
     in property <string> clock;
+    in property <string> date;
+
+    // 0 none, 1 quick panel, 2 power, 3 settings, 4 controllers
+    in property <int> overlay;
+    in property <int> panel-index;
+    in property <int> power-index;
+    in property <int> settings-index;
+    in property <[string]> settings-values;
     in property <string> toast;
     in property <bool> toast-visible;
 
@@ -461,9 +502,166 @@ export component AppWindow inherits Window {
         }
     }
 
+    // --- Quick panel (Menu button), Power and Settings ---
+    if overlay != 0: Rectangle {
+        background: #000000a0;
+    }
+
+    if overlay == 1 || overlay == 2: Rectangle {
+        x: root.width - self.width;
+        width: 620 * u;
+        background: #0b1019f5;
+        border-width: 1px;
+        border-color: #ffffff14;
+        Text {
+            x: 56 * u;
+            y: 56 * u;
+            text: clock;
+            font-size: 72 * u;
+            font-weight: 200;
+            color: white;
+        }
+
+        Text {
+            x: 56 * u;
+            y: 150 * u;
+            text: date;
+            font-size: 26 * u;
+            font-weight: 300;
+            color: #ffffffb3;
+        }
+
+        if overlay == 1: Rectangle {
+            property <[{glyph: string, label: string}]> items: [
+                { glyph: "\u{E713}", label: "Settings" },
+                { glyph: "\u{E7FC}", label: "Controllers" },
+                { glyph: "\u{E72C}", label: "Rescan library" },
+                { glyph: "\u{E7E8}", label: "Power" },
+                { glyph: "\u{E8BB}", label: "Exit launcher" },
+            ];
+            for item[i] in items: PanelTile {
+                x: 56 * u + Math.mod(i, 2) * 264 * u;
+                y: 250 * u + Math.floor(i / 2) * 204 * u;
+                width: 244 * u;
+                height: 184 * u;
+                glyph: item.glyph;
+                label: item.label;
+                focused: i == panel-index;
+                u: u;
+            }
+        }
+
+        if overlay == 2: Rectangle {
+            property <[string]> items: ["Sleep", "Restart", "Shut down", "Cancel"];
+            Text {
+                x: 56 * u;
+                y: 250 * u;
+                text: "Power";
+                font-size: 34 * u;
+                font-weight: 600;
+                color: white;
+            }
+
+            for item[i] in items: Rectangle {
+                x: 44 * u;
+                y: 320 * u + i * 84 * u;
+                width: parent.width - 88 * u;
+                height: 72 * u;
+                border-radius: 14 * u;
+                background: i == power-index ? white : transparent;
+                Text {
+                    x: 24 * u;
+                    height: parent.height;
+                    text: item;
+                    font-size: 28 * u;
+                    color: i == power-index ? black : white;
+                    vertical-alignment: center;
+                }
+            }
+        }
+    }
+
+    if overlay == 3: Rectangle {
+        property <[string]> labels: ["UI sounds volume", "Music volume"];
+        x: (root.width - self.width) / 2;
+        y: (root.height - self.height) / 2;
+        width: 900 * u;
+        height: 460 * u;
+        border-radius: 24 * u;
+        background: #0f1522f7;
+        border-width: 1px;
+        border-color: #ffffff1a;
+        Text {
+            x: 56 * u;
+            y: 44 * u;
+            text: "Settings";
+            font-size: 40 * u;
+            font-weight: 600;
+            color: white;
+        }
+
+        for label[i] in labels: Rectangle {
+            x: 40 * u;
+            y: 140 * u + i * 96 * u;
+            width: parent.width - 80 * u;
+            height: 80 * u;
+            border-radius: 16 * u;
+            background: i == settings-index ? #ffffff1f : transparent;
+            border-width: i == settings-index ? 2px : 0;
+            border-color: #2d8cff;
+            Text {
+                x: 28 * u;
+                height: parent.height;
+                text: label;
+                font-size: 28 * u;
+                color: white;
+                vertical-alignment: center;
+            }
+
+            // Fixed width so the arrows hug the value at the right end of the row.
+            HorizontalLayout {
+                width: 200 * u;
+                x: parent.width - self.width - 28 * u;
+                height: parent.height;
+                spacing: 18 * u;
+                alignment: center;
+                Glyph {
+                    text: "\u{E76B}";
+                    font-size: 22 * u;
+                    color: i == settings-index ? white : #ffffff66;
+                }
+
+                Text {
+                    text: settings-values[i];
+                    min-width: 90 * u;
+                    font-size: 28 * u;
+                    font-weight: 600;
+                    color: i == settings-index ? white : #ffffffa6;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                }
+
+                Glyph {
+                    text: "\u{E76C}";
+                    font-size: 22 * u;
+                    color: i == settings-index ? white : #ffffff66;
+                }
+            }
+        }
+
+        Text {
+            x: 56 * u;
+            y: parent.height - 70 * u;
+            text: "Left / Right to change  ·  B to go back";
+            font-size: 22 * u;
+            color: #ffffff80;
+        }
+    }
+
     // Messages sit in the empty band between the game row and the title, clear of every row.
     Rectangle {
-        x: root.width - margin - self.width;
+        // Beside the quick panel while it is open, so messages never cover its tiles.
+        x: (overlay == 1 || overlay == 2 ? root.width - 620 * u : root.width) - margin - self.width;
         y: 320 * u;
         width: min(toast-text.preferred-width + 60 * u, root.width - 2 * margin);
         height: 60 * u;
