@@ -84,7 +84,10 @@ Steam, Epic, GOG, Xbox/Game Pass, EA and Ubisoft libraries · online metadata or
 3. **Home UI (PS5 layout):** tabs, game row, logo and action buttons, background art crossfade, and the game sheet.
 4. **Launch & return:** process launch and tracking, hide/sleep while in game, the Start + Select return combo, and last-played tracking.
 5. **Sound:** synthesized UI sounds, ambient bed and per-game music crossfade.
-6. **Quick panel, Settings, Controller test, Power actions.**
+6. **Quick panel, Settings, Controllers screen, Power actions.**
+   - **Controllers screen** (per connected pad, remembered per controller model): a picture of the pad in the middle, its buttons listed around it in columns like x360ce (left: triggers, bumpers, Back/Start, D-pad, left stick; right: face buttons, right stick). Up/Down moves through the list and the selected button **glows on the picture**. Mouse works too.
+   - **Extra triggers:** any button can get extra inputs that also act as it, either a keyboard key or another pad button (for example keyboard Insert also presses L3 when the pad's L3 is broken). These apply to the virtual Xbox pad, so they work in every game that uses translation.
+   - **Live test:** pressing a button on the pad lights it on the picture.
 7. **Performance pass:** measure against the targets and fix.
 
 ## Performance targets
