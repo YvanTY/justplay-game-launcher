@@ -18,9 +18,9 @@ use windows_sys::Win32::Devices::Display::{
 use windows_sys::Win32::Foundation::{LPARAM, RECT};
 use windows_sys::Win32::Graphics::Gdi::{
     CDS_NORESET, CDS_SET_PRIMARY, CDS_UPDATEREGISTRY, ChangeDisplaySettingsExW, DEVMODEW,
-    DISP_CHANGE_SUCCESSFUL, DISPLAY_DEVICE_ATTACHED_TO_DESKTOP, DISPLAY_DEVICEW, DM_POSITION,
-    ENUM_CURRENT_SETTINGS, EnumDisplayDevicesW, EnumDisplayMonitors, EnumDisplaySettingsW,
-    GetMonitorInfoW, HDC, HMONITOR, MONITORINFOEXW,
+    DISP_CHANGE_SUCCESSFUL, DISPLAY_DEVICE_ATTACHED_TO_DESKTOP, DISPLAY_DEVICE_PRIMARY_DEVICE,
+    DISPLAY_DEVICEW, DM_POSITION, ENUM_CURRENT_SETTINGS, EnumDisplayDevicesW, EnumDisplayMonitors,
+    EnumDisplaySettingsW, GetMonitorInfoW, HDC, HMONITOR, MONITORINFOEXW,
 };
 
 /// Where the launcher, or a game, is shown.
@@ -286,6 +286,18 @@ fn set_primary(device: &str, screens: &[Screen]) -> Result<(), String> {
         .find(|s| s.device == device)
         .ok_or_else(|| format!("{device} isn't connected"))?;
     let (dx, dy) = (target.x, target.y);
+    // Each adapter staged so far, as it was: put back if a later one is refused, so a half-made
+    // change doesn't sit in the registry until the next display change applies it.
+    let mut staged: Vec<([u16; 32], DEVMODEW, bool)> = Vec::new();
+    let undo = |staged: &[([u16; 32], DEVMODEW, bool)]| {
+        for (name, original, was_primary) in staged {
+            let mut flags = CDS_UPDATEREGISTRY | CDS_NORESET;
+            if *was_primary {
+                flags |= CDS_SET_PRIMARY;
+            }
+            unsafe { ChangeDisplaySettingsExW(name.as_ptr(), original, null_mut(), flags, null()) };
+        }
+    };
     unsafe {
         let mut index = 0;
         loop {
@@ -312,6 +324,8 @@ fn set_primary(device: &str, screens: &[Screen]) -> Result<(), String> {
             {
                 continue;
             }
+            let mut original = mode;
+            original.dmFields = DM_POSITION;
             mode.Anonymous1.Anonymous2.dmPosition.x -= dx;
             mode.Anonymous1.Anonymous2.dmPosition.y -= dy;
             mode.dmFields = DM_POSITION;
@@ -327,14 +341,23 @@ fn set_primary(device: &str, screens: &[Screen]) -> Result<(), String> {
                 null(),
             );
             if result != DISP_CHANGE_SUCCESSFUL {
+                undo(&staged);
                 return Err(format!(
                     "Windows refused to move {} (error {result})",
                     text(&adapter.DeviceName)
                 ));
             }
+            let was_primary = adapter.StateFlags & DISPLAY_DEVICE_PRIMARY_DEVICE != 0;
+            staged.push((adapter.DeviceName, original, was_primary));
         }
         // Applies everything staged above at once.
-        ChangeDisplaySettingsExW(null(), null(), null_mut(), 0, null());
+        let result = ChangeDisplaySettingsExW(null(), null(), null_mut(), 0, null());
+        if result != DISP_CHANGE_SUCCESSFUL {
+            undo(&staged);
+            return Err(format!(
+                "Windows refused to change the main display (error {result})"
+            ));
+        }
     }
     Ok(())
 }

@@ -134,6 +134,9 @@ struct App {
     pointer_timer: Timer,
     /// A check of greyed-out games' files is running (see check_unavailable).
     reach_check: bool,
+    /// Games whose files are all there yet still greyed out after a reload: not checked again,
+    /// so they can't reload the library every tick.
+    reach_stuck: HashSet<String>,
     /// The action being handled came from a pad (not the keyboard, the mouse or a hint).
     pad_input: bool,
     /// Controllers screen: when each held pad button (index in controllers::ALL) went down,
@@ -248,6 +251,7 @@ fn main() -> Result<(), slint::PlatformError> {
         repeated_click: false,
         pointer_timer: Timer::default(),
         reach_check: false,
+        reach_stuck: HashSet::new(),
         pad_input: false,
         held_since: HashMap::new(),
         holds_done: HashSet::new(),
@@ -1011,10 +1015,21 @@ fn drain_background(ui: &AppWindow, app: &mut App) {
                     diag::log(&format!("games reachable again: {ids:?}"));
                     match reload_library(ui, app) {
                         Ok(_) => {
-                            let count = ids.len();
-                            let games = if count == 1 { "game is" } else { "games are" };
-                            app.toasts
-                                .show(ui, format!("{count} {games} available again"));
+                            let still_missing = |id: &String| {
+                                app.home
+                                    .games
+                                    .iter()
+                                    .any(|g| g.id == *id && g.missing.is_some())
+                            };
+                            let (stuck, back): (Vec<String>, Vec<String>) =
+                                ids.into_iter().partition(|id| still_missing(id));
+                            app.reach_stuck.extend(stuck);
+                            let count = back.len();
+                            if count > 0 {
+                                let games = if count == 1 { "game is" } else { "games are" };
+                                app.toasts
+                                    .show(ui, format!("{count} {games} available again"));
+                            }
                         }
                         Err(e) => diag::log(&e),
                     }
@@ -1265,7 +1280,10 @@ fn use_screen_layout(
 /// The launcher's screen: Windows' layout for it, then its window on the chosen screen.
 fn show_launcher_on_its_screen(ui: &AppWindow, app: &mut App) {
     let choice = app.home.state.launcher_screen.clone();
-    use_screen_layout(ui, app, &choice, false);
+    // Over a running game the game's layout stays: Resume goes straight back to it.
+    if app.running.is_none() {
+        use_screen_layout(ui, app, &choice, false);
+    }
     let screens = display::screens();
     if screens.len() < 2 {
         return;
@@ -1292,6 +1310,9 @@ fn restore_screens(app: &mut App) {
     };
     if let Err(e) = display::apply(&original) {
         diag::log(&format!("could not restore the screen layout: {e}"));
+        // Kept, so the next start tries again.
+        app.home.state.display_restore = Some(original);
+        return;
     }
     if let Err(e) = app.home.state.save(&app.state_path) {
         diag::log(&e);
@@ -1360,6 +1381,8 @@ fn game_ended(ui: &AppWindow, app: &mut App, message: &str) {
     if app.in_background {
         come_back(ui, app);
     } else {
+        // The launcher was already up over the game, still on the game's screen layout.
+        show_launcher_on_its_screen(ui, app);
         push_selection(ui, app);
         push_scalars(ui, &app.home);
     }
@@ -2351,6 +2374,8 @@ fn track_holds(ui: &AppWindow, app: &mut App, mask: u32) {
 /// Runs a held button's action once its time is up, and shows how far along the hold is.
 fn hold_tick(ui: &AppWindow, app: &mut App) {
     if app.menus.overlay != Overlay::Controllers || app.capturing {
+        // Buttons down now (such as the one being captured) start a hold only after a release.
+        app.holds_done.extend(app.held_since.keys().copied());
         app.held_since.clear();
         app.hold_timer.stop();
         show_hold(ui, None);
@@ -2755,7 +2780,7 @@ fn check_unavailable(app: &mut App) {
         .home
         .games
         .iter()
-        .filter(|g| g.missing.is_some())
+        .filter(|g| g.missing.is_some() && !app.reach_stuck.contains(&g.id))
         .map(|g| (g.id.clone(), g.requires.clone()))
         .collect();
     if games.is_empty() {
