@@ -139,7 +139,7 @@ component TriggerChip inherits Rectangle {
         height: parent.height;
         text: label;
         color: held ? #0b1424 : #ffffff;
-        font-size: parent.height * 0.5;
+        font-size: parent.height * 0.62;
         font-weight: 800;
         horizontal-alignment: center;
         vertical-alignment: center;
@@ -156,11 +156,12 @@ export component ControllerPicture inherits Rectangle {
     // Height / width of the art. Size the element to width * aspect for an exact fit.
     out property <float> aspect: 1122 / 1504;
     // Where each input sits, in controllers::ALL order, in units of width / 1000.
+    // LT/RT point at the chip's outer edge so the connector's end dot doesn't cover the label.
     out property <[{x: float, y: float}]> anchors: [
-        { x: 246.0, y: 19.3 }, { x: 246.0, y: 63.2 }, { x: 427.5, y: 229.4 }, { x: 568.5, y: 229.4 }, { x: 498.7, y: 123.0 },
+        { x: 202.8, y: 19.9 }, { x: 246.0, y: 63.2 }, { x: 427.5, y: 229.4 }, { x: 568.5, y: 229.4 }, { x: 498.7, y: 123.0 },
         { x: 248.7, y: 226.7 }, { x: 248.7, y: 137.0 }, { x: 158.9, y: 226.7 }, { x: 338.4, y: 226.7 }, { x: 248.7, y: 316.5 },
         { x: 367.7, y: 339.1 }, { x: 319.1, y: 389.0 }, { x: 417.6, y: 389.0 }, { x: 367.7, y: 438.8 },
-        { x: 751.3, y: 19.3 }, { x: 751.3, y: 63.2 }, { x: 750.7, y: 164.9 }, { x: 682.8, y: 229.4 }, { x: 817.2, y: 232.7 }, { x: 750.0, y: 292.6 },
+        { x: 794.5, y: 19.9 }, { x: 751.3, y: 63.2 }, { x: 750.7, y: 164.9 }, { x: 682.8, y: 229.4 }, { x: 817.2, y: 232.7 }, { x: 750.0, y: 292.6 },
         { x: 627.0, y: 370.3 }, { x: 627.0, y: 280.6 }, { x: 537.2, y: 370.3 }, { x: 716.8, y: 370.3 }, { x: 627.0, y: 460.1 },
     ];
 
@@ -174,9 +175,9 @@ export component ControllerPicture inherits Rectangle {
 
         TriggerChip {
             x: 305 * unit;
-            y: 6 * unit;
+            y: 4 * unit;
             width: 130 * unit;
-            height: 46 * unit;
+            height: 52 * unit;
             unit: unit;
             label: "LT";
             accent: accent;
@@ -186,9 +187,9 @@ export component ControllerPicture inherits Rectangle {
         }
         TriggerChip {
             x: 1065 * unit;
-            y: 6 * unit;
+            y: 4 * unit;
             width: 130 * unit;
-            height: 46 * unit;
+            height: 52 * unit;
             unit: unit;
             label: "RT";
             accent: accent;
