@@ -10,8 +10,9 @@ use std::sync::mpsc::{self, Receiver, Sender};
 
 use crate::AppWindow;
 use crate::library::discover::{self, Candidate, Known};
+use crate::library::find_image;
 use crate::scaled_art::{self, Kind, Pixels};
-use crate::steam;
+use crate::{net, pcgw, steam};
 
 pub enum Event {
     /// A background finished decoding; None when this decoder can't read the file.
@@ -37,9 +38,10 @@ pub enum Event {
 }
 
 pub enum ArtOutcome {
-    /// Steam has the game; `saved` new images are now in its art folder.
-    Found { app: u32, saved: usize },
-    /// Steam has no game with exactly this title.
+    /// The game was identified (`app`: its Steam app, if it has one); `saved` new images are
+    /// now in its art folder.
+    Found { app: Option<u32>, saved: usize },
+    /// Neither Steam nor PCGamingWiki knows a game with this title.
     NoMatch,
     /// Offline or Steam unreachable: worth trying again next start.
     Failed(String),
@@ -49,7 +51,7 @@ pub struct ArtJob {
     pub id: String,
     pub title: String,
     pub dir: PathBuf,
-    /// File names from `steam::SLOTS` that the game is missing.
+    /// Slots ("icon", "hero", "logo") the game has no image for.
     pub wanted: Vec<&'static str>,
 }
 
@@ -107,11 +109,12 @@ pub fn spawn_art_fetcher(notifier: Notifier) -> Sender<ArtJob> {
         .name("art-fetcher".into())
         .spawn(move || {
             while let Ok(job) = jobs.recv() {
-                let outcome = match steam::find(&job.title) {
-                    Ok(Some(app)) => download_one_by_one(&notifier, &job, app),
-                    Ok(None) => ArtOutcome::NoMatch,
-                    Err(e) => ArtOutcome::Failed(e.to_string()),
-                };
+                let id = job.id.clone();
+                let landed = || notifier.send(Event::ArtFile { id: id.clone() });
+                let outcome = fetch_art(&job, landed).unwrap_or_else(|e| {
+                    // Whatever was saved before the failure stays; the rest is retried.
+                    ArtOutcome::Failed(e.to_string())
+                });
                 notifier.send(Event::Art {
                     id: job.id,
                     outcome,
@@ -124,21 +127,71 @@ pub fn spawn_art_fetcher(notifier: Notifier) -> Sender<ArtJob> {
     sender
 }
 
-/// The cover is small and the background large: showing each image as it lands means the tile
-/// changes within a second instead of after the whole set.
-fn download_one_by_one(notifier: &Notifier, job: &ArtJob, app: u32) -> ArtOutcome {
+/// Finds the game and fills its missing slots from the best source that has them:
+/// 1. Steam's library images, for a game the store search finds;
+/// 2. PCGamingWiki, for games Steam stopped selling (their Steam images often remain) and box
+///    art for games that were never on Steam;
+/// 3. a store screenshot as the background and the store banner as the icon, for old games
+///    without library images.
+///
+/// Each image appears as soon as it lands: the cover is small and the background large.
+/// `on_image` runs after each saved image.
+fn fetch_art(job: &ArtJob, mut on_image: impl FnMut()) -> Result<ArtOutcome, net::Error> {
+    let missing = || -> Vec<&'static str> {
+        job.wanted
+            .iter()
+            .copied()
+            .filter(|slot| find_image(&job.dir, slot).is_none())
+            .collect()
+    };
     let mut saved = 0;
-    for file in &job.wanted {
-        match steam::download(app, &job.dir, &[file]) {
-            Ok(0) => {}
-            Ok(count) => {
-                saved += count;
-                notifier.send(Event::ArtFile { id: job.id.clone() });
-            }
-            Err(e) => return ArtOutcome::Failed(e.to_string()),
+    let mut landed = |count: usize| {
+        if count > 0 {
+            saved += count;
+            on_image();
+        }
+    };
+    let mut apps: Vec<u32> = Vec::new();
+    let mut known = false;
+    if let Some(app) = steam::find(&job.title)? {
+        known = true;
+        apps.push(app);
+        for slot in missing() {
+            landed(steam::download(app, &job.dir, &[slot])?);
         }
     }
-    ArtOutcome::Found { app, saved }
+    if !missing().is_empty()
+        && let Some(wiki) = pcgw::lookup(&job.title)?
+    {
+        known = true;
+        if let Some(app) = wiki.steam_app.filter(|app| !apps.contains(app)) {
+            apps.push(app);
+            for slot in missing() {
+                landed(steam::download(app, &job.dir, &[slot])?);
+            }
+        }
+        if missing().contains(&"icon")
+            && let Some(cover) = &wiki.cover
+        {
+            landed(usize::from(steam::save(cover, &job.dir, "icon")?));
+        }
+    }
+    for &app in &apps {
+        if missing().contains(&"hero") {
+            landed(usize::from(steam::download_screenshot(app, &job.dir)?));
+        }
+        if missing().contains(&"icon") {
+            landed(usize::from(steam::download_banner(app, &job.dir)?));
+        }
+    }
+    Ok(if known {
+        ArtOutcome::Found {
+            app: apps.first().copied(),
+            saved,
+        }
+    } else {
+        ArtOutcome::NoMatch
+    })
 }
 
 /// Looks for games on `roots` for the Add games screen. Setting `cancel` stops it; a cancelled
@@ -156,5 +209,58 @@ pub fn spawn_scan(notifier: Notifier, roots: Vec<PathBuf>, known: Known, cancel:
         });
     if let Err(e) = spawned {
         crate::diag::log(&format!("drive scan could not start: {e}"));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Yvan's games that found no art with the first lookup. Downloads into a temporary folder:
+    /// `cargo test yvans_titles -- --ignored --nocapture`.
+    #[test]
+    #[ignore]
+    fn yvans_titles() {
+        let root = std::env::temp_dir().join(format!("gl-art-live-{}", std::process::id()));
+        for title in [
+            "Blur",
+            "Demon Slayer - Kimetsu no Yaiba",
+            "eFootball PES 2021",
+            "FIFA 19",
+            "Grand Theft Auto V",
+            "Pro Evolution Soccer 2017",
+            "PRO EVOLUTION SOCCER 2019",
+        ] {
+            let job = ArtJob {
+                id: title.into(),
+                title: title.into(),
+                dir: root.join(crate::library::safe_file_name(title)),
+                wanted: vec!["icon", "hero", "logo"],
+            };
+            let outcome = fetch_art(&job, || {}).unwrap();
+            let files: Vec<String> = std::fs::read_dir(&job.dir)
+                .map(|d| {
+                    d.flatten()
+                        .map(|e| e.file_name().to_string_lossy().into_owned())
+                        .collect()
+                })
+                .unwrap_or_default();
+            let found = match outcome {
+                ArtOutcome::Found { app, saved } => format!("app {app:?}, {saved} saved"),
+                ArtOutcome::NoMatch => "no match".into(),
+                ArtOutcome::Failed(e) => format!("failed: {e}"),
+            };
+            println!("{title:<34} {found:<24} {files:?}");
+            if title.starts_with("Demon Slayer") {
+                assert_eq!(files_in(&job.dir), 0, "ambiguous: left to the art picker");
+            } else {
+                assert!(files_in(&job.dir) > 0, "{title}");
+            }
+        }
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    fn files_in(dir: &std::path::Path) -> usize {
+        std::fs::read_dir(dir).map(|d| d.count()).unwrap_or(0)
     }
 }

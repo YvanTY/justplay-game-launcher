@@ -16,6 +16,7 @@ mod menus;
 mod music;
 mod nav;
 mod net;
+mod pcgw;
 mod scaled_art;
 mod state;
 mod steam;
@@ -111,8 +112,14 @@ fn main() -> Result<(), slint::PlatformError> {
     diag::init(&data_dir);
     let mut problems = Vec::new();
     let state_path = data_dir.join("state.json");
-    let (state, state_problem) = State::load(&state_path);
+    let (mut state, state_problem) = State::load(&state_path);
     problems.extend(state_problem);
+    // 2: Steam editions and subtitles, then PCGamingWiki for games Steam no longer sells.
+    if state.retry_art_misses(2)
+        && let Err(e) = state.save(&state_path)
+    {
+        problems.push(e);
+    }
     let drive_mask = library::drives::mask();
     let library = match config::load(&data_dir) {
         Ok(config) => library::load(&config, &state.added_games, &data_dir),
@@ -603,9 +610,9 @@ fn queue_art_lookups(app: &mut App) {
             continue;
         }
         let wanted: Vec<&'static str> = [
-            (game.art.icon.is_none(), "icon.jpg"),
-            (game.art.hero.is_none(), "hero.jpg"),
-            (game.art.logo.is_none(), "logo.png"),
+            (game.art.icon.is_none(), "icon"),
+            (game.art.hero.is_none(), "hero"),
+            (game.art.logo.is_none(), "logo"),
         ]
         .into_iter()
         .filter_map(|(missing, file)| missing.then_some(file))
@@ -634,12 +641,12 @@ fn art_fetched(ui: &AppWindow, app: &mut App, id: String, outcome: ArtOutcome) {
         } => {
             // Each image was already shown as it arrived (ArtFile).
             diag::log(&format!(
-                "art for {id}: Steam app {steam_app}, {saved} new images"
+                "art for {id}: Steam app {steam_app:?}, {saved} new images"
             ));
-            Some(steam_app)
+            steam_app
         }
         ArtOutcome::NoMatch => {
-            diag::log(&format!("art for {id}: no exact match on Steam"));
+            diag::log(&format!("art for {id}: unknown to Steam and PCGamingWiki"));
             None
         }
         ArtOutcome::Failed(e) => {

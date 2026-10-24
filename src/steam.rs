@@ -6,15 +6,20 @@ use std::path::Path;
 
 use serde::Deserialize;
 
+use crate::library::find_image;
 use crate::net;
 
 const SEARCH: &str = "https://store.steampowered.com/api/storesearch/?l=english&cc=US&term=";
+const DETAILS: &str = "https://store.steampowered.com/api/appdetails?filters=screenshots&appids=";
 const IMAGES: &str = "https://shared.akamai.steamstatic.com/store_item_assets/steam/apps";
 
 /// Suffixes that name the same game in another edition, so "God of War" still matches
-/// "God of War Remastered". Normalized (see `normalize`).
+/// "God of War Remastered" and "Grand Theft Auto V" matches "… V Enhanced". Normalized.
 const EDITIONS: &[&str] = &[
     "remastered",
+    "remaster",
+    "hd",
+    "hd remaster",
     "definitive edition",
     "game of the year edition",
     "game of the year",
@@ -22,23 +27,46 @@ const EDITIONS: &[&str] = &[
     "goty edition",
     "complete edition",
     "deluxe edition",
+    "enhanced",
     "enhanced edition",
+    "legacy",
+    "legacy edition",
     "directors cut",
     "anniversary edition",
     "ultimate edition",
     "gold edition",
     "special edition",
     "standard edition",
+    "season update",
 ];
 
-/// File in the art folder, then the Steam images to try for it, sharpest first.
+/// Words that mark add-ons and other products sold under the game's name.
+const NOT_THE_GAME: &[&str] = &[
+    "pass",
+    "pack",
+    "dlc",
+    "soundtrack",
+    "ost",
+    "upgrade",
+    "bundle",
+    "demo",
+    "costume",
+    "skin",
+    "artbook",
+    "expansion",
+    "character",
+    "kit",
+    "coins",
+    "points",
+    "currency",
+    "season",
+];
+
+/// Art folder slot, then the Steam images to try for it, sharpest first.
 pub const SLOTS: [(&str, &[&str]); 3] = [
-    (
-        "icon.jpg",
-        &["library_600x900_2x.jpg", "library_600x900.jpg"],
-    ),
-    ("hero.jpg", &["library_hero_2x.jpg", "library_hero.jpg"]),
-    ("logo.png", &["logo_2x.png", "logo.png"]),
+    ("icon", &["library_600x900_2x.jpg", "library_600x900.jpg"]),
+    ("hero", &["library_hero_2x.jpg", "library_hero.jpg"]),
+    ("logo", &["logo_2x.png", "logo.png"]),
 ];
 
 #[derive(Deserialize)]
@@ -55,26 +83,46 @@ struct Item {
     kind: String,
 }
 
-/// The Steam app with exactly this title, if any. A near miss is rejected: wrong art is worse
-/// than none.
+/// The Steam app for this title, if the store lists one that is clearly the same game.
+/// Games Steam no longer sells don't appear here (see `pcgw`).
 pub fn find(title: &str) -> Result<Option<u32>, net::Error> {
     let body = net::get(&format!("{SEARCH}{}", net::encode(title)))?;
     let search: Search = serde_json::from_slice(&body)
         .map_err(|e| net::Error::Failed(format!("unexpected Steam answer: {e}")))?;
-    Ok(best_match(title, &search.items))
+    let apps: Vec<&Item> = search
+        .items
+        .iter()
+        .filter(|i| i.kind.is_empty() || i.kind == "app")
+        .collect();
+    Ok(best_title(title, apps.iter().map(|i| i.name.as_str())).map(|index| apps[index].id))
 }
 
-fn best_match(title: &str, items: &[Item]) -> Option<u32> {
+/// Index of the name that is the same game as `title`: an exact match first, then another
+/// edition, then (for long titles) the title with a subtitle added. A near miss is rejected,
+/// because wrong art is worse than none. Ties go to the earlier name (search relevance), except
+/// between two different subtitles, which is a guess (the art picker settles those).
+pub fn best_title<'a>(title: &str, names: impl Iterator<Item = &'a str>) -> Option<usize> {
     let wanted = normalize(title);
-    let apps = || {
-        items
-            .iter()
-            .filter(|i| i.kind.is_empty() || i.kind == "app")
-    };
-    apps()
-        .find(|i| normalize(&i.name) == wanted)
-        .or_else(|| apps().find(|i| same_but_edition(&wanted, &normalize(&i.name))))
-        .map(|i| i.id)
+    let mut ranked: Vec<(u8, usize)> = names
+        .enumerate()
+        .filter_map(|(index, name)| match_rank(&wanted, &normalize(name)).map(|rank| (rank, index)))
+        .collect();
+    ranked.sort();
+    match ranked.as_slice() {
+        [(2, _), (2, _), ..] => None,
+        [(_, index), ..] => Some(*index),
+        [] => None,
+    }
+}
+
+fn match_rank(wanted: &str, name: &str) -> Option<u8> {
+    if wanted == name {
+        return Some(0);
+    }
+    if same_but_edition(wanted, name) {
+        return Some(1);
+    }
+    with_subtitle(wanted, name).then_some(2)
 }
 
 fn same_but_edition(a: &str, b: &str) -> bool {
@@ -82,6 +130,20 @@ fn same_but_edition(a: &str, b: &str) -> bool {
     long.strip_prefix(short)
         .and_then(|rest| rest.strip_prefix(' '))
         .is_some_and(|edition| EDITIONS.contains(&edition))
+}
+
+/// "Demon Slayer Kimetsu no Yaiba" is "Demon Slayer Kimetsu no Yaiba The Hinokami Chronicles",
+/// but "God of War" is not "God of War Ragnarok": only titles of four words or more may gain a
+/// subtitle, and never a number (a sequel) or an add-on word.
+fn with_subtitle(wanted: &str, name: &str) -> bool {
+    if wanted.split(' ').count() < 4 {
+        return false;
+    }
+    let Some(rest) = name.strip_prefix(wanted).and_then(|r| r.strip_prefix(' ')) else {
+        return false;
+    };
+    rest.split(' ')
+        .all(|word| !word.chars().all(|c| c.is_ascii_digit()) && !NOT_THE_GAME.contains(&word))
 }
 
 /// Lowercase words without punctuation or trademark signs, roman numerals as digits:
@@ -117,86 +179,177 @@ fn normalize(title: &str) -> String {
         .join(" ")
 }
 
-/// Downloads the images named in `wanted` (file names from SLOTS) into `dir`, never replacing a
-/// file that is already there. Returns how many were saved; a slot Steam doesn't have is skipped.
+/// Downloads the library images for the slots in `wanted` ("icon", "hero", "logo") into `dir`,
+/// skipping slots that already have an image. Returns how many were saved; a slot Steam doesn't
+/// have is skipped.
 pub fn download(app: u32, dir: &Path, wanted: &[&str]) -> Result<usize, net::Error> {
     let mut saved = 0;
-    for (file, sources) in SLOTS.iter().filter(|(file, _)| wanted.contains(file)) {
-        let target = dir.join(file);
-        if target.exists() {
+    for (slot, sources) in SLOTS.iter().filter(|(slot, _)| wanted.contains(slot)) {
+        if find_image(dir, slot).is_some() {
             continue;
         }
         for source in *sources {
-            match net::get(&format!("{IMAGES}/{app}/{source}")) {
-                Ok(bytes) if looks_like_image(&bytes) => {
-                    fs::create_dir_all(dir)
-                        .map_err(|e| net::Error::Failed(format!("{}: {e}", dir.display())))?;
-                    // Written aside then renamed, so a half-downloaded file is never shown.
-                    let temp = target.with_extension("part");
-                    fs::write(&temp, &bytes)
-                        .and_then(|()| fs::rename(&temp, &target))
-                        .map_err(|e| net::Error::Failed(format!("{}: {e}", target.display())))?;
-                    saved += 1;
-                    break;
-                }
-                Ok(_) | Err(net::Error::Status(_)) => continue,
-                Err(e) => return Err(e),
+            if save(&format!("{IMAGES}/{app}/{source}"), dir, slot)? {
+                saved += 1;
+                break;
             }
         }
     }
     Ok(saved)
 }
 
-fn looks_like_image(bytes: &[u8]) -> bool {
-    bytes.starts_with(&[0xFF, 0xD8, 0xFF]) || bytes.starts_with(b"\x89PNG\r\n\x1a\n")
+/// Older games have no library background; a full-size store screenshot stands in for it.
+pub fn download_screenshot(app: u32, dir: &Path) -> Result<bool, net::Error> {
+    #[derive(Deserialize)]
+    struct Details {
+        #[serde(default)]
+        success: bool,
+        data: Option<Data>,
+    }
+    #[derive(Deserialize)]
+    struct Data {
+        #[serde(default)]
+        screenshots: Vec<Screenshot>,
+    }
+    #[derive(Deserialize)]
+    struct Screenshot {
+        path_full: String,
+    }
+    let body = net::get(&format!("{DETAILS}{app}"))?;
+    let details: std::collections::HashMap<String, Details> =
+        serde_json::from_slice(&body).unwrap_or_default();
+    let url = details
+        .into_values()
+        .find(|d| d.success)
+        .and_then(|d| d.data)
+        .and_then(|d| d.screenshots.into_iter().next())
+        .map(|s| s.path_full);
+    match url {
+        Some(url) => save(&url, dir, "hero"),
+        None => Ok(false),
+    }
+}
+
+/// The small store banner (460x215), kept for games Steam has no cover for.
+pub fn download_banner(app: u32, dir: &Path) -> Result<bool, net::Error> {
+    save(&format!("{IMAGES}/{app}/header.jpg"), dir, "icon")
+}
+
+/// Saves the image at `url` as `<slot>.<jpg|png>` in `dir`. Ok(false) when the server has no
+/// such image; never replaces a file that is already there.
+pub fn save(url: &str, dir: &Path, slot: &str) -> Result<bool, net::Error> {
+    let bytes = match net::get(url) {
+        Ok(bytes) => bytes,
+        Err(net::Error::Status(_)) => return Ok(false),
+        Err(e) => return Err(e),
+    };
+    let extension = if bytes.starts_with(&[0xFF, 0xD8, 0xFF]) {
+        "jpg"
+    } else if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
+        "png"
+    } else {
+        return Ok(false);
+    };
+    if find_image(dir, slot).is_some() {
+        return Ok(false);
+    }
+    fs::create_dir_all(dir).map_err(|e| net::Error::Failed(format!("{}: {e}", dir.display())))?;
+    let target = dir.join(format!("{slot}.{extension}"));
+    // Written aside then renamed, so a half-downloaded file is never shown.
+    let temp = target.with_extension("part");
+    fs::write(&temp, &bytes)
+        .and_then(|()| fs::rename(&temp, &target))
+        .map_err(|e| net::Error::Failed(format!("{}: {e}", target.display())))?;
+    Ok(true)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn items(names: &[(u32, &str)]) -> Vec<Item> {
-        names
-            .iter()
-            .map(|&(id, name)| Item {
-                id,
-                name: name.into(),
-                kind: "app".into(),
-            })
-            .collect()
+    fn best(title: &str, names: &[&str]) -> Option<usize> {
+        best_title(title, names.iter().copied())
     }
 
     #[test]
     fn exact_titles_match_despite_trademarks_and_numerals() {
-        let found = items(&[
-            (
-                2254450,
-                "The Last of Us™ Part I - Upgrade to Digital Deluxe Edition",
-            ),
-            (1888930, "The Last of Us™ Part I"),
-        ]);
-        assert_eq!(best_match("The Last of Us Part 1", &found), Some(1888930));
-        let gow = items(&[(1593500, "God of War"), (2322010, "God of War Ragnarök")]);
-        assert_eq!(best_match("God of War", &gow), Some(1593500));
+        let names = [
+            "The Last of Us™ Part I - Upgrade to Digital Deluxe Edition",
+            "The Last of Us™ Part I",
+        ];
+        assert_eq!(best("The Last of Us Part 1", &names), Some(1));
+        assert_eq!(
+            best("God of War", &["God of War", "God of War Ragnarök"]),
+            Some(0)
+        );
+        assert_eq!(
+            best("PRO EVOLUTION SOCCER 2019", &["Pro Evolution Soccer 2019"]),
+            Some(0)
+        );
     }
 
     #[test]
     fn near_misses_are_rejected() {
         // Steam's only answer for this PS3 game is a different game.
-        let found = items(&[(1239990, "Dantes Bullet Inferno")]);
-        assert_eq!(best_match("Dante's Inferno", &found), None);
-        let dlc = items(&[(1, "God of War Soundtrack")]);
-        assert_eq!(best_match("God of War", &dlc), None);
+        assert_eq!(best("Dante's Inferno", &["Dantes Bullet Inferno"]), None);
+        assert_eq!(best("God of War", &["God of War Soundtrack"]), None);
+        assert_eq!(
+            best("God of War", &["God of War Ragnarök"]),
+            None,
+            "short titles stay exact"
+        );
+        assert_eq!(
+            best(
+                "Blur",
+                &["Ricochet Blur", "Synth Riders: Blur - \"Song 2\""]
+            ),
+            None
+        );
     }
 
     #[test]
     fn editions_of_the_same_game_match() {
-        let found = items(&[(1, "Sleeping Dogs: Definitive Edition")]);
-        assert_eq!(best_match("Sleeping Dogs", &found), Some(1));
-        let found = items(&[(2, "Fallout 3")]);
         assert_eq!(
-            best_match("Fallout 3: Game of the Year Edition", &found),
-            Some(2)
+            best("Sleeping Dogs", &["Sleeping Dogs: Definitive Edition"]),
+            Some(0)
+        );
+        assert_eq!(
+            best("Fallout 3: Game of the Year Edition", &["Fallout 3"]),
+            Some(0)
+        );
+        let gta = [
+            "Grand Theft Auto V Enhanced",
+            "Grand Theft Auto: Vice City – The Definitive Edition",
+        ];
+        assert_eq!(best("Grand Theft Auto V", &gta), Some(0));
+        assert_eq!(
+            best("eFootball PES 2021", &["EFootball PES 2021 Season Update"]),
+            Some(0)
+        );
+    }
+
+    #[test]
+    fn long_titles_may_gain_a_subtitle_but_not_a_sequel_or_an_add_on() {
+        // Steam's own order for this search.
+        let names = [
+            "Demon Slayer -Kimetsu no Yaiba- The Hinokami Chronicles 2",
+            "Demon Slayer -Kimetsu no Yaiba- The Hinokami Chronicles",
+            "Demon Slayer -Kimetsu no Yaiba- Sweep the Board!",
+            "Demon Slayer -Kimetsu no Yaiba- The Hinokami Chronicles: Character Pass",
+        ];
+        assert_eq!(
+            best("Demon Slayer - Kimetsu no Yaiba", &names[..2]),
+            Some(1)
+        );
+        // Two different subtitles fit: guessing could show another game's art.
+        assert_eq!(best("Demon Slayer - Kimetsu no Yaiba", &names), None);
+        assert_eq!(
+            best(
+                "Grand Theft Auto V",
+                &["Grand Theft Auto V Enhanced", "Grand Theft Auto V Legacy"]
+            ),
+            Some(0),
+            "editions are not guesses"
         );
     }
 
@@ -207,9 +360,10 @@ mod tests {
         assert_eq!(find("God of War").unwrap(), Some(1593500));
         assert_eq!(find("The Last of Us Part I").unwrap(), Some(1888930));
         assert_eq!(find("Dante's Inferno").unwrap(), None);
+        assert_eq!(find("Grand Theft Auto V").unwrap(), Some(3240220));
         let dir = std::env::temp_dir().join(format!("gl-steam-live-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
-        let saved = download(1593500, &dir, &["icon.jpg", "hero.jpg", "logo.png"]).unwrap();
+        let saved = download(1593500, &dir, &["icon", "hero", "logo"]).unwrap();
         assert_eq!(saved, 3);
         let hero = image::open(dir.join("hero.jpg")).unwrap();
         assert_eq!(
@@ -218,17 +372,15 @@ mod tests {
             "the sharp background"
         );
         assert_eq!(
-            download(1593500, &dir, &["icon.jpg"]).unwrap(),
+            download(1593500, &dir, &["icon"]).unwrap(),
             0,
             "never re-downloads"
         );
+        // Blur left the store long ago: no library art, but screenshots and a banner remain.
+        let old = dir.join("blur");
+        assert_eq!(download(42640, &old, &["icon", "hero", "logo"]).unwrap(), 0);
+        assert!(download_screenshot(42640, &old).unwrap());
+        assert!(download_banner(42640, &old).unwrap());
         let _ = fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn only_real_images_are_saved() {
-        assert!(looks_like_image(&[0xFF, 0xD8, 0xFF, 0xE0]));
-        assert!(looks_like_image(b"\x89PNG\r\n\x1a\n...."));
-        assert!(!looks_like_image(b"<html>not found</html>"));
     }
 }

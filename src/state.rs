@@ -21,8 +21,10 @@ pub struct State {
     pub added_games: Vec<crate::config::PcGame>,
     /// Folders the Add games screen should no longer suggest.
     pub ignored_folders: BTreeSet<PathBuf>,
-    /// Game id -> Steam app id its art came from (None: Steam has no match). Looked up once.
+    /// Game id -> Steam app id its art came from (None: no Steam app). Looked up once.
     pub art_lookups: HashMap<String, Option<u32>>,
+    /// Version of the art lookup that filled `art_lookups`; a newer lookup retries the misses.
+    pub art_lookup_version: u32,
 }
 
 /// User preferences from the Settings page. Volumes are percentages in steps of 10.
@@ -109,6 +111,17 @@ impl State {
         let temp: PathBuf = path.with_extension("json.tmp");
         fs::write(&temp, json).map_err(|e| format!("Could not save {}: {e}", temp.display()))?;
         fs::rename(&temp, path).map_err(|e| format!("Could not save {}: {e}", path.display()))
+    }
+
+    /// Forgets lookups that found nothing with an older, weaker lookup, so they are tried again.
+    /// True when something changed (worth saving).
+    pub fn retry_art_misses(&mut self, version: u32) -> bool {
+        if self.art_lookup_version >= version {
+            return false;
+        }
+        self.art_lookups.retain(|_, app| app.is_some());
+        self.art_lookup_version = version;
+        true
     }
 
     pub fn toggle_favorite(&mut self, id: &str) {
