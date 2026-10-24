@@ -155,6 +155,169 @@ component HoldBadge inherits Rectangle {
     }
 }
 
+export struct AddRow {
+    title: string,
+    // The exe that will be launched.
+    detail: string,
+    // 0 new, 1 added, 2 ignored
+    status: int,
+    // "exe 1 of 3" when Left/Right can pick another exe; empty otherwise.
+    choice: string,
+}
+
+component AddRowView inherits Rectangle {
+    in property <AddRow> data;
+    in property <bool> selected;
+    in property <length> u;
+    border-radius: 14 * u;
+    background: selected ? @linear-gradient(90deg, #2d8cff40 0%, #2d8cff14 100%) : #ffffff07;
+    border-width: 1px;
+    border-color: selected ? #2d8cffb0 : #ffffff0f;
+    opacity: data.status == 2 && !selected ? 0.55 : 1;
+    animate background { duration: 90ms; }
+    Rectangle {
+        x: 0;
+        y: 12 * u;
+        width: 4 * u;
+        height: parent.height - 24 * u;
+        border-radius: 2 * u;
+        background: selected ? #2d8cff : transparent;
+    }
+
+    HorizontalLayout {
+        padding-left: 20 * u;
+        padding-right: 20 * u;
+        spacing: 18 * u;
+        VerticalLayout {
+            alignment: center;
+            Rectangle {
+                width: 48 * u;
+                height: 48 * u;
+                border-radius: 24 * u;
+                background: data.status == 1 ? #2ecc71 : selected ? #2d8cff : #ffffff14;
+                Text {
+                    width: parent.width;
+                    height: parent.height;
+                    // Segoe MDL2: check mark, hidden eye, game pad.
+                    text: data.status == 1 ? "\u{E8FB}" : data.status == 2 ? "\u{ED1A}" : "\u{E7FC}";
+                    font-family: "Segoe MDL2 Assets";
+                    font-size: 22 * u;
+                    color: white;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                }
+            }
+        }
+
+        // Takes the spare width, so the choice and the status sit at the right end.
+        VerticalLayout {
+            horizontal-stretch: 1;
+            alignment: center;
+            spacing: 4 * u;
+            Text {
+                text: data.title;
+                font-size: 26 * u;
+                font-weight: selected ? 600 : 400;
+                color: white;
+                overflow: elide;
+            }
+
+            Text {
+                text: data.detail;
+                font-size: 17 * u;
+                color: #ffffff73;
+                overflow: elide;
+            }
+        }
+
+        if selected && data.status == 0 && data.choice != "": HorizontalLayout {
+            spacing: 10 * u;
+            alignment: center;
+            Text {
+                text: "\u{E76B}";
+                font-family: "Segoe MDL2 Assets";
+                font-size: 16 * u;
+                color: #ffffffb3;
+                vertical-alignment: center;
+            }
+
+            Text {
+                text: data.choice;
+                font-size: 18 * u;
+                color: #ffffffb3;
+                vertical-alignment: center;
+            }
+
+            Text {
+                text: "\u{E76C}";
+                font-family: "Segoe MDL2 Assets";
+                font-size: 16 * u;
+                color: #ffffffb3;
+                vertical-alignment: center;
+            }
+        }
+
+        // The action is written on the row itself, so A always says what it will do.
+        if selected && data.status == 0: VerticalLayout {
+            alignment: center;
+            Rectangle {
+                width: add-label.preferred-width + 76 * u;
+                height: 48 * u;
+                border-radius: 24 * u;
+                background: white;
+                HorizontalLayout {
+                    padding-left: 10 * u;
+                    padding-right: 22 * u;
+                    spacing: 12 * u;
+                    alignment: center;
+                    VerticalLayout {
+                        alignment: center;
+                        Rectangle {
+                            width: 30 * u;
+                            height: 30 * u;
+                            border-radius: 15 * u;
+                            background: #101521;
+                            Text {
+                                width: parent.width;
+                                height: parent.height;
+                                text: "A";
+                                font-size: 15 * u;
+                                font-weight: 700;
+                                color: white;
+                                horizontal-alignment: center;
+                                vertical-alignment: center;
+                            }
+                        }
+                    }
+
+                    add-label := Text {
+                        text: "Add to library";
+                        font-size: 20 * u;
+                        font-weight: 600;
+                        color: #101521;
+                        vertical-alignment: center;
+                    }
+                }
+            }
+        }
+
+        if data.status == 1: Text {
+            text: "Added";
+            font-size: 20 * u;
+            font-weight: 600;
+            color: #2ecc71;
+            vertical-alignment: center;
+        }
+
+        if data.status == 2: Text {
+            text: selected ? "Ignored · Y to restore" : "Ignored";
+            font-size: 18 * u;
+            color: #ffffffa6;
+            vertical-alignment: center;
+        }
+    }
+}
+
 export struct TabInfo {
     name: string,
     count: int,
@@ -320,7 +483,7 @@ export component AppWindow inherits Window {
     in property <string> clock;
     in property <string> date;
 
-    // 0 none, 1 quick panel, 2 power, 3 settings, 4 controllers
+    // 0 none, 1 quick panel, 2 power, 3 settings, 4 controllers, 5 add games
     in property <int> overlay;
     in property <int> panel-index;
     in property <int> power-index;
@@ -335,6 +498,10 @@ export component AppWindow inherits Window {
     in property <string> capture-text;
     in property <float> back-progress;
     in property <bool> gear-focused;
+    in property <[AddRow]> add-rows;
+    in property <int> add-index;
+    in property <bool> add-scanning;
+    in property <string> add-status;
     in property <string> toast;
     in property <bool> toast-visible;
 
@@ -693,6 +860,7 @@ export component AppWindow inherits Window {
             property <[{glyph: string, label: string}]> items: [
                 { glyph: "\u{E713}", label: "Settings" },
                 { glyph: "\u{E7FC}", label: "Controllers" },
+                { glyph: "\u{ECCD}", label: "Add games" },
                 { glyph: "\u{E72C}", label: "Rescan library" },
                 { glyph: "\u{E7E8}", label: "Power" },
                 { glyph: "\u{E8BB}", label: "Exit launcher" },
@@ -983,12 +1151,121 @@ export component AppWindow inherits Window {
         }
     }
 
+    // --- Add games screen ---
+    if overlay == 5: Rectangle {
+        property <length> row-h: 84 * u;
+        property <length> row-pitch: 94 * u;
+        property <int> visible-rows: 8;
+        // Keeps the selected row in view, a little above the bottom edge.
+        property <int> scroll: Math.max(0, Math.min(add-index - 5, add-rows.length - visible-rows));
+        background: @radial-gradient(circle, #1a2744 0%, #0d1320 45%, #080b12 100%);
+
+        Text {
+            x: margin;
+            y: 40 * u;
+            text: "Add games";
+            font-size: 40 * u;
+            font-weight: 600;
+            color: white;
+        }
+
+        Text {
+            x: margin;
+            y: 96 * u;
+            width: root.width - 2 * margin;
+            text: add-status;
+            font-size: 22 * u;
+            font-weight: 300;
+            color: #ffffffb3;
+            overflow: elide;
+        }
+
+        for row[i] in add-rows: AddRowView {
+            data: row;
+            selected: i == add-index;
+            u: u;
+            x: margin;
+            y: 170 * u + (i - scroll) * row-pitch;
+            width: root.width - 2 * margin;
+            height: row-h;
+            visible: i >= scroll && i < scroll + visible-rows;
+            animate y { duration: 150ms; easing: ease-out; }
+        }
+
+        if add-rows.length == 0: VerticalLayout {
+            x: margin;
+            y: 300 * u;
+            width: root.width - 2 * margin;
+            spacing: 18 * u;
+            Text {
+                text: add-scanning ? "\u{E721}" : "\u{E7FC}";
+                font-family: "Segoe MDL2 Assets";
+                font-size: 64 * u;
+                color: #ffffff59;
+                horizontal-alignment: center;
+            }
+
+            Text {
+                text: add-scanning ? "Looking through your drives for installed games" : "Nothing new to add";
+                font-size: 30 * u;
+                font-weight: 300;
+                color: #ffffffcc;
+                horizontal-alignment: center;
+            }
+
+            Text {
+                text: add-scanning ? "External drives count too, as long as they are plugged in" : "Install a game anywhere on your drives, then press RB to look again";
+                font-size: 20 * u;
+                color: #ffffff73;
+                horizontal-alignment: center;
+            }
+        }
+
+        HorizontalLayout {
+            x: margin;
+            y: root.height - 66 * u;
+            width: root.width - 2 * margin;
+            height: 46 * u;
+            alignment: end;
+            spacing: 32 * u;
+            ButtonHint {
+                key: "A";
+                label: "Add";
+                u: u;
+            }
+
+            ButtonHint {
+                key: "← →";
+                label: "Other exe";
+                u: u;
+            }
+
+            ButtonHint {
+                key: "Y";
+                label: "Ignore / restore";
+                u: u;
+            }
+
+            ButtonHint {
+                key: "RB";
+                label: "Look again";
+                u: u;
+            }
+
+            ButtonHint {
+                key: "B";
+                label: "Back";
+                u: u;
+            }
+        }
+    }
+
     // Messages sit in the empty band between the game row and the title, clear of every row.
     Rectangle {
         // Beside the quick panel while it is open, so messages never cover its tiles.
         x: (overlay == 1 || overlay == 2 ? root.width - 620 * u : root.width) - margin - self.width;
         // The Controllers screen fills the band below the header, so messages use the header's corner there.
-        y: overlay == 4 ? 44 * u : 320 * u;
+        y: overlay == 4 || overlay == 5 ? 44 * u : 320 * u;
         width: min(toast-text.preferred-width + 60 * u, root.width - 2 * margin);
         height: 60 * u;
         border-radius: self.height / 2;

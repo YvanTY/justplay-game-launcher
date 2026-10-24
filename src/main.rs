@@ -1,6 +1,7 @@
 // Release builds run without a console window; debug builds keep it for logs.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod add_games;
 mod audio;
 mod background;
 mod config;
@@ -23,7 +24,8 @@ use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
-use std::sync::atomic::Ordering;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use slint::{Color, Image, ModelRc, SharedString, Timer, TimerMode, VecModel};
@@ -92,6 +94,10 @@ struct App {
     art_fetcher: std::sync::mpsc::Sender<ArtJob>,
     /// Game ids whose Steam lookup is queued or running.
     art_pending: HashSet<String>,
+    notifier: background::Notifier,
+    /// The Add games screen, and the switch that stops its drive scan.
+    add_games: add_games::AddGames,
+    scan_cancel: Arc<AtomicBool>,
 }
 
 fn main() -> Result<(), slint::PlatformError> {
@@ -162,8 +168,11 @@ fn main() -> Result<(), slint::PlatformError> {
         drive_timer: Timer::default(),
         background: background_events,
         hero_loader: background::spawn_hero_loader(notifier.clone()),
-        art_fetcher: background::spawn_art_fetcher(notifier),
+        art_fetcher: background::spawn_art_fetcher(notifier.clone()),
         art_pending: HashSet::new(),
+        notifier,
+        add_games: add_games::AddGames::default(),
+        scan_cancel: Arc::new(AtomicBool::new(false)),
     }));
 
     {
@@ -518,6 +527,18 @@ fn drain_background(ui: &AppWindow, app: &mut App) {
             background::Event::Hero { path, pixels } => hero_loaded(ui, app, path, pixels),
             background::Event::ArtFile { id } => refresh_art(ui, app, &id),
             background::Event::Art { id, outcome } => art_fetched(ui, app, id, outcome),
+            background::Event::ScanProgress { folders } if app.add_games.scanning => {
+                app.add_games.folders = folders;
+                sync_add_games_screen(ui, app);
+            }
+            background::Event::ScanDone { found } if app.add_games.scanning => {
+                diag::log(&format!("drive scan found {} games", found.len()));
+                app.add_games
+                    .set_results(found, &app.home.state.ignored_folders);
+                sync_add_games_screen(ui, app);
+            }
+            // A scan that was cancelled (screen closed) still finishing its last step.
+            background::Event::ScanProgress { .. } | background::Event::ScanDone { .. } => {}
         }
     }
     for problem in app.images.problems.drain(..) {
@@ -1020,6 +1041,10 @@ fn handle_menu_action(ui: &AppWindow, app: &mut App, action: Action) {
         handle_controllers_action(ui, app, action);
         return;
     }
+    if app.menus.overlay == Overlay::AddGames && action != Action::Menu && action != Action::Back {
+        handle_add_games_action(ui, app, action);
+        return;
+    }
     let snapshot = |m: &Menus| (m.overlay, m.panel_focus, m.power_focus, m.settings_focus);
     let before = snapshot(&app.menus);
     let effects = app.menus.handle(action);
@@ -1045,6 +1070,7 @@ fn handle_menu_action(ui: &AppWindow, app: &mut App, action: Action) {
     for effect in effects {
         match effect {
             MenuEffect::Rescan => rescan(ui, app),
+            MenuEffect::FindGames => start_find_games(app),
             MenuEffect::Exit => {
                 let _ = slint::quit_event_loop();
             }
@@ -1070,6 +1096,190 @@ fn handle_menu_action(ui: &AppWindow, app: &mut App, action: Action) {
     }
     push_menus(ui, app);
     sync_controllers_screen(ui, app);
+    sync_add_games_screen(ui, app);
+}
+
+/// Starts looking for games on every fixed and removable drive (the Add games screen).
+fn start_find_games(app: &mut App) {
+    // A previous scan still running is no longer wanted.
+    app.scan_cancel.store(true, Ordering::Relaxed);
+    let cancel = Arc::new(AtomicBool::new(false));
+    app.scan_cancel = cancel.clone();
+    app.add_games.start_scan();
+    let mut exes = Vec::new();
+    let mut skip = vec![config::data_dir()];
+    for game in &app.home.games {
+        exes.push(game.launch.exe.clone());
+        exes.extend(game.requires.iter().cloned());
+        // Emulator folders hold the emulator, not PC games.
+        if game.platform != "PC"
+            && let Some(dir) = game.launch.exe.parent()
+        {
+            skip.push(dir.to_path_buf());
+        }
+    }
+    let roots = library::drives::scannable()
+        .into_iter()
+        .map(|letter| PathBuf::from(format!("{letter}:\\")))
+        .collect();
+    let known = library::discover::Known::new(&exes, &skip);
+    background::spawn_scan(app.notifier.clone(), roots, known, cancel);
+}
+
+/// The Add games screen: A adds, Left/Right picks another exe, Y ignores or restores, RB scans
+/// again (B goes back through the menu logic).
+fn handle_add_games_action(ui: &AppWindow, app: &mut App, action: Action) {
+    let before = (
+        app.add_games.focus,
+        app.add_games.rows.get(app.add_games.focus).map(|r| r.exe),
+    );
+    let effect = app.add_games.handle(action);
+    let after = (
+        app.add_games.focus,
+        app.add_games.rows.get(app.add_games.focus).map(|r| r.exe),
+    );
+    let sound = match &effect {
+        Some(add_games::Effect::Add(index)) => {
+            add_found_game(ui, app, *index);
+            Some(Sound::Confirm)
+        }
+        Some(add_games::Effect::Ignore(index)) => {
+            set_ignored(ui, app, *index, true);
+            Some(Sound::Back)
+        }
+        Some(add_games::Effect::Restore(index)) => {
+            set_ignored(ui, app, *index, false);
+            Some(Sound::Confirm)
+        }
+        Some(add_games::Effect::Rescan) => {
+            start_find_games(app);
+            Some(Sound::Confirm)
+        }
+        None if before != after => Some(Sound::Move),
+        None => matches!(
+            action,
+            Action::Up | Action::Down | Action::Left | Action::Right
+        )
+        .then_some(Sound::Bump),
+    };
+    if let Some(sound) = sound {
+        play_sound(app, sound);
+    }
+    sync_add_games_screen(ui, app);
+}
+
+fn add_found_game(ui: &AppWindow, app: &mut App, index: usize) {
+    let row = &app.add_games.rows[index];
+    // Ids are "pc:<name>", so a second game with the same name gets a number.
+    let base = row.candidate.title.clone();
+    let taken = |name: &str| app.home.games.iter().any(|g| g.id == format!("pc:{name}"));
+    let mut name = base.clone();
+    let mut number = 2;
+    while taken(&name) {
+        name = format!("{base} ({number})");
+        number += 1;
+    }
+    let exe = row.exe_path().clone();
+    app.home.state.added_games.push(config::PcGame {
+        name: name.clone(),
+        exe,
+        args: String::new(),
+        icon: None,
+        hero: None,
+        logo: None,
+        xinput: true,
+    });
+    if let Err(e) = app.home.state.save(&app.state_path) {
+        app.home.state.added_games.pop();
+        app.toasts.show(ui, e);
+        return;
+    }
+    app.add_games.rows[index].status = add_games::Status::Added;
+    if let Err(e) = reload_library(ui, app) {
+        app.toasts.show(ui, e);
+        return;
+    }
+    let fetching = app.art_pending.contains(&format!("pc:{name}"));
+    app.toasts.show(
+        ui,
+        if fetching {
+            format!("{name} added to your PC games · getting its art")
+        } else {
+            format!("{name} added to your PC games")
+        },
+    );
+}
+
+fn set_ignored(ui: &AppWindow, app: &mut App, index: usize, ignored: bool) {
+    let row = &mut app.add_games.rows[index];
+    let folder = row.candidate.folder.clone();
+    let title = row.candidate.title.clone();
+    if ignored {
+        row.status = add_games::Status::Ignored;
+        app.home.state.ignored_folders.insert(folder);
+        app.toasts.show(
+            ui,
+            format!("{title} won't be suggested again (Y restores it)"),
+        );
+    } else {
+        row.status = add_games::Status::New;
+        app.home.state.ignored_folders.remove(&folder);
+    }
+    if let Err(e) = app.home.state.save(&app.state_path) {
+        app.toasts.show(ui, e);
+    }
+}
+
+/// Mirrors the Add games screen into the window; leaving the screen stops a running scan.
+fn sync_add_games_screen(ui: &AppWindow, app: &mut App) {
+    if app.menus.overlay != Overlay::AddGames {
+        if app.add_games.scanning {
+            app.scan_cancel.store(true, Ordering::Relaxed);
+            app.add_games.scanning = false;
+        }
+        return;
+    }
+    let screen = &app.add_games;
+    let rows: Vec<AddRow> = screen
+        .rows
+        .iter()
+        .map(|row| AddRow {
+            title: row.candidate.title.as_str().into(),
+            detail: row.exe_path().display().to_string().into(),
+            status: match row.status {
+                add_games::Status::New => 0,
+                add_games::Status::Added => 1,
+                add_games::Status::Ignored => 2,
+            },
+            choice: if row.candidate.exes.len() > 1 {
+                format!("exe {} of {}", row.exe + 1, row.candidate.exes.len()).into()
+            } else {
+                SharedString::new()
+            },
+        })
+        .collect();
+    let status = if screen.scanning {
+        format!(
+            "Looking for games on your drives… {} folders checked",
+            screen.folders
+        )
+    } else if screen.rows.is_empty() {
+        "No new games found. Games already in your library aren't listed.".to_string()
+    } else {
+        let (new, added) = (screen.new_count(), screen.added_count());
+        let found = new + added;
+        let games = if found == 1 { "game" } else { "games" };
+        match (new, added) {
+            (0, 0) => "Only ignored games found (Y restores one)".to_string(),
+            (0, _) => format!("All {found} added · find them in your PC tab"),
+            (_, 0) => format!("{found} new {games} found"),
+            _ => format!("{found} new {games} found · {added} added"),
+        }
+    };
+    ui.set_add_rows(ModelRc::new(VecModel::from(rows)));
+    ui.set_add_index(screen.focus as i32);
+    ui.set_add_scanning(screen.scanning);
+    ui.set_add_status(status.into());
 }
 
 /// The Controllers screen: move through the button lists, A to add a key/button, Y to clear.
@@ -1307,6 +1517,7 @@ fn push_menus(ui: &AppWindow, app: &App) {
         Overlay::Power => 2,
         Overlay::Settings => 3,
         Overlay::Controllers => 4,
+        Overlay::AddGames => 5,
     });
     ui.set_panel_index(menus.panel_focus as i32);
     ui.set_power_index(menus.power_focus as i32);

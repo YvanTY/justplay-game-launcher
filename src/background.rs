@@ -1,11 +1,15 @@
-//! Work kept off the UI thread: decoding backgrounds and fetching art from Steam. Each worker
+//! Work kept off the UI thread: decoding backgrounds, fetching art from Steam and scanning the
+//! drives for games. Each worker
 //! blocks on its own queue (no CPU while idle) and sends results through one channel, then pokes
 //! the UI, which drains the channel on its own thread.
 
 use std::path::PathBuf;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
 
 use crate::AppWindow;
+use crate::library::discover::{self, Candidate, Known};
 use crate::scaled_art::{self, Kind, Pixels};
 use crate::steam;
 
@@ -22,6 +26,13 @@ pub enum Event {
     Art {
         id: String,
         outcome: ArtOutcome,
+    },
+    /// The drive scan has looked at this many folders so far.
+    ScanProgress {
+        folders: usize,
+    },
+    ScanDone {
+        found: Vec<Candidate>,
     },
 }
 
@@ -128,4 +139,22 @@ fn download_one_by_one(notifier: &Notifier, job: &ArtJob, app: u32) -> ArtOutcom
         }
     }
     ArtOutcome::Found { app, saved }
+}
+
+/// Looks for games on `roots` for the Add games screen. Setting `cancel` stops it; a cancelled
+/// scan reports nothing.
+pub fn spawn_scan(notifier: Notifier, roots: Vec<PathBuf>, known: Known, cancel: Arc<AtomicBool>) {
+    let spawned = std::thread::Builder::new()
+        .name("drive-scan".into())
+        .spawn(move || {
+            let found = discover::scan(&roots, &known, &cancel, |folders| {
+                notifier.send(Event::ScanProgress { folders });
+            });
+            if !cancel.load(Ordering::Relaxed) {
+                notifier.send(Event::ScanDone { found });
+            }
+        });
+    if let Err(e) = spawned {
+        crate::diag::log(&format!("drive scan could not start: {e}"));
+    }
 }

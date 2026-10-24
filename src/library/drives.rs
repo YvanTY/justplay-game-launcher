@@ -2,7 +2,13 @@
 
 use std::path::Path;
 
-use windows_sys::Win32::Storage::FileSystem::{GetLogicalDrives, GetVolumeInformationW};
+use windows_sys::Win32::Storage::FileSystem::{
+    GetDriveTypeW, GetLogicalDrives, GetVolumeInformationW,
+};
+
+// GetDriveTypeW results (WinBase.h); defined here rather than enabling another windows-sys module.
+const DRIVE_REMOVABLE: u32 = 2;
+const DRIVE_FIXED: u32 = 3;
 
 /// Bit 0 is A:, bit 1 is B:, and so on. One cheap call, so it can be polled to notice plugging.
 pub fn mask() -> u32 {
@@ -24,6 +30,17 @@ pub fn is_connected(letter: char) -> bool {
 
 pub fn connected() -> Vec<char> {
     letters(mask()).filter(|&l| is_connected(l)).collect()
+}
+
+/// Internal disks, USB disks and sticks: the drives worth scanning for games. Network shares and
+/// optical drives are left out (slow, and games aren't installed there).
+pub fn scannable() -> Vec<char> {
+    letters(mask())
+        .filter(|&l| {
+            let kind = unsafe { GetDriveTypeW(wide(&format!("{l}:\\")).as_ptr()) };
+            (kind == DRIVE_FIXED || kind == DRIVE_REMOVABLE) && is_connected(l)
+        })
+        .collect()
 }
 
 /// The name shown in Explorer, e.g. "Nouveau nom"; None when it has none.
@@ -74,5 +91,6 @@ mod tests {
         let letter = system.chars().next().unwrap();
         assert!(is_connected(letter));
         assert!(connected().contains(&letter));
+        assert!(scannable().contains(&letter));
     }
 }

@@ -1,6 +1,7 @@
 //! Builds the game list from the config: PC games, RPCS3 and folder-scanned emulators.
 
 mod cache;
+pub mod discover;
 pub mod drives;
 mod emulator;
 mod rpcs3;

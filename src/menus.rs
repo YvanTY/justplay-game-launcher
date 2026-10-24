@@ -1,5 +1,6 @@
-//! The quick panel (Menu button) and the screens it opens: Power and Settings. UI-free so the
-//! navigation can be unit-tested; main.rs mirrors it into the window.
+//! The quick panel (Menu button) and the screens it opens: Power and Settings (the Controllers
+//! and Add games screens have their own logic). UI-free so the navigation can be unit-tested;
+//! main.rs mirrors it into the window.
 
 use crate::Action;
 
@@ -10,6 +11,7 @@ pub enum Overlay {
     Power,
     Settings,
     Controllers,
+    AddGames,
 }
 
 /// Quick panel tiles, laid out two per row.
@@ -17,14 +19,16 @@ pub enum Overlay {
 pub enum PanelItem {
     Settings,
     Controllers,
+    AddGames,
     Rescan,
     Power,
     Exit,
 }
 
-pub const PANEL: [PanelItem; 5] = [
+pub const PANEL: [PanelItem; 6] = [
     PanelItem::Settings,
     PanelItem::Controllers,
+    PanelItem::AddGames,
     PanelItem::Rescan,
     PanelItem::Power,
     PanelItem::Exit,
@@ -57,6 +61,8 @@ pub const SETTINGS: [Setting; 2] = [Setting::SoundVolume, Setting::MusicVolume];
 #[derive(Debug, PartialEq, Eq)]
 pub enum MenuEffect {
     Rescan,
+    /// The Add games screen opened: look for games on the drives.
+    FindGames,
     Exit,
     Sleep,
     Restart,
@@ -106,8 +112,8 @@ impl Menus {
             Overlay::Panel => self.handle_panel(action),
             Overlay::Power => self.handle_power(action),
             Overlay::Settings => self.handle_settings(action),
-            // The Controllers screen has its own logic; this only covers leaving it.
-            Overlay::Controllers => {
+            // These screens have their own logic; this only covers leaving them.
+            Overlay::Controllers | Overlay::AddGames => {
                 if action == Action::Back {
                     self.overlay = Overlay::Panel;
                 }
@@ -141,6 +147,10 @@ impl Menus {
                     PanelItem::Controllers => {
                         self.overlay = Overlay::Controllers;
                         Vec::new()
+                    }
+                    PanelItem::AddGames => {
+                        self.overlay = Overlay::AddGames;
+                        vec![MenuEffect::FindGames]
                     }
                     PanelItem::Rescan => {
                         self.overlay = Overlay::None;
@@ -216,21 +226,25 @@ mod tests {
         menus.handle(Action::Right);
         assert_eq!(PANEL[menus.panel_focus], PanelItem::Controllers);
         menus.handle(Action::Down);
-        assert_eq!(PANEL[menus.panel_focus], PanelItem::Power);
-        // From Power (right column) down onto the single-tile last row: Exit.
-        menus.handle(Action::Down);
-        assert_eq!(PANEL[menus.panel_focus], PanelItem::Exit);
-        menus.handle(Action::Down);
-        assert_eq!(PANEL[menus.panel_focus], PanelItem::Exit);
-        menus.handle(Action::Up);
         assert_eq!(PANEL[menus.panel_focus], PanelItem::Rescan);
+        menus.handle(Action::Down);
+        assert_eq!(PANEL[menus.panel_focus], PanelItem::Exit);
+        menus.handle(Action::Down);
+        assert_eq!(PANEL[menus.panel_focus], PanelItem::Exit);
+        menus.handle(Action::Left);
+        assert_eq!(PANEL[menus.panel_focus], PanelItem::Power);
+        menus.handle(Action::Up);
+        menus.handle(Action::Up);
+        assert_eq!(PANEL[menus.panel_focus], PanelItem::Settings);
+        menus.handle(Action::Down);
+        assert_eq!(PANEL[menus.panel_focus], PanelItem::AddGames);
     }
 
     #[test]
     fn power_needs_a_second_deliberate_choice() {
         let mut menus = Menus::new();
         menus.open_panel();
-        menus.panel_focus = 3; // Power
+        menus.panel_focus = 4; // Power
         assert!(menus.handle(Action::Confirm).is_empty());
         assert_eq!(menus.overlay, Overlay::Power);
         menus.handle(Action::Down);
@@ -243,13 +257,24 @@ mod tests {
     fn cancel_and_back_return_to_the_panel() {
         let mut menus = Menus::new();
         menus.open_panel();
-        menus.panel_focus = 3;
+        menus.panel_focus = 4; // Power
         menus.handle(Action::Confirm);
         menus.handle(Action::Back);
         assert_eq!(menus.overlay, Overlay::Panel);
         menus.handle(Action::Confirm);
         menus.power_focus = 3; // Cancel
         assert!(menus.handle(Action::Confirm).is_empty());
+        assert_eq!(menus.overlay, Overlay::Panel);
+    }
+
+    #[test]
+    fn add_games_opens_and_starts_looking() {
+        let mut menus = Menus::new();
+        menus.open_panel();
+        menus.panel_focus = 2;
+        assert_eq!(menus.handle(Action::Confirm), [MenuEffect::FindGames]);
+        assert_eq!(menus.overlay, Overlay::AddGames);
+        menus.handle(Action::Back);
         assert_eq!(menus.overlay, Overlay::Panel);
     }
 
