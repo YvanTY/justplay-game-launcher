@@ -10,17 +10,16 @@ use std::ptr::{null, null_mut};
 use serde::{Deserialize, Serialize};
 use windows_sys::Win32::Devices::Display::{
     DISPLAYCONFIG_DEVICE_INFO_GET_SOURCE_NAME, DISPLAYCONFIG_DEVICE_INFO_GET_TARGET_NAME,
-    DISPLAYCONFIG_MODE_INFO, DISPLAYCONFIG_PATH_INFO, DISPLAYCONFIG_SOURCE_DEVICE_NAME,
-    DISPLAYCONFIG_TARGET_DEVICE_NAME, DISPLAYCONFIG_TOPOLOGY_CLONE, DisplayConfigGetDeviceInfo,
-    GetDisplayConfigBufferSizes, QDC_DATABASE_CURRENT, QDC_ONLY_ACTIVE_PATHS, QueryDisplayConfig,
-    SDC_APPLY, SDC_TOPOLOGY_CLONE, SDC_TOPOLOGY_EXTEND, SetDisplayConfig,
+    DISPLAYCONFIG_MODE_INFO, DISPLAYCONFIG_MODE_INFO_TYPE_SOURCE, DISPLAYCONFIG_PATH_INFO,
+    DISPLAYCONFIG_SOURCE_DEVICE_NAME, DISPLAYCONFIG_TARGET_DEVICE_NAME,
+    DISPLAYCONFIG_TOPOLOGY_CLONE, DisplayConfigGetDeviceInfo, GetDisplayConfigBufferSizes,
+    QDC_DATABASE_CURRENT, QDC_ONLY_ACTIVE_PATHS, QueryDisplayConfig, SDC_ALLOW_CHANGES, SDC_APPLY,
+    SDC_SAVE_TO_DATABASE, SDC_TOPOLOGY_CLONE, SDC_TOPOLOGY_EXTEND, SDC_USE_SUPPLIED_DISPLAY_CONFIG,
+    SetDisplayConfig,
 };
 use windows_sys::Win32::Foundation::{LPARAM, RECT};
 use windows_sys::Win32::Graphics::Gdi::{
-    CDS_NORESET, CDS_SET_PRIMARY, CDS_UPDATEREGISTRY, ChangeDisplaySettingsExW, DEVMODEW,
-    DISP_CHANGE_SUCCESSFUL, DISPLAY_DEVICE_ATTACHED_TO_DESKTOP, DISPLAY_DEVICE_PRIMARY_DEVICE,
-    DISPLAY_DEVICEW, DM_POSITION, ENUM_CURRENT_SETTINGS, EnumDisplayDevicesW, EnumDisplayMonitors,
-    EnumDisplaySettingsW, GetMonitorInfoW, HDC, HMONITOR, MONITORINFOEXW,
+    EnumDisplayMonitors, GetMonitorInfoW, HDC, HMONITOR, MONITORINFOEXW,
 };
 
 /// Where the launcher, or a game, is shown.
@@ -171,7 +170,7 @@ pub fn screens() -> Vec<Screen> {
 /// Device name (`\\.\DISPLAY1`) -> the monitor's own name, from Windows' display configuration.
 fn friendly_names() -> HashMap<String, String> {
     let mut names: HashMap<String, String> = HashMap::new();
-    let Some((paths, _)) = query(QDC_ONLY_ACTIVE_PATHS) else {
+    let Some((paths, _, _)) = query(QDC_ONLY_ACTIVE_PATHS) else {
         return names;
     };
     for path in paths {
@@ -205,7 +204,14 @@ fn friendly_names() -> HashMap<String, String> {
     names
 }
 
-fn query(flags: u32) -> Option<(Vec<DISPLAYCONFIG_PATH_INFO>, i32)> {
+#[allow(clippy::type_complexity)]
+fn query(
+    flags: u32,
+) -> Option<(
+    Vec<DISPLAYCONFIG_PATH_INFO>,
+    Vec<DISPLAYCONFIG_MODE_INFO>,
+    i32,
+)> {
     unsafe {
         let (mut path_count, mut mode_count) = (0u32, 0u32);
         if GetDisplayConfigBufferSizes(flags, &mut path_count, &mut mode_count) != 0 {
@@ -231,14 +237,15 @@ fn query(flags: u32) -> Option<(Vec<DISPLAYCONFIG_PATH_INFO>, i32)> {
             return None;
         }
         paths.truncate(path_count as usize);
-        Some((paths, topology))
+        modes.truncate(mode_count as usize);
+        Some((paths, modes, topology))
     }
 }
 
 /// What Windows is set to now.
 pub fn current(screens: &[Screen]) -> Layout {
     let duplicated = query(QDC_DATABASE_CURRENT)
-        .is_some_and(|(_, topology)| topology == DISPLAYCONFIG_TOPOLOGY_CLONE);
+        .is_some_and(|(_, _, topology)| topology == DISPLAYCONFIG_TOPOLOGY_CLONE);
     let primary = screens
         .iter()
         .find(|s| s.primary)
@@ -273,93 +280,65 @@ pub fn apply(layout: &Layout) -> Result<(), String> {
             .iter()
             .any(|s| s.primary && s.device == layout.primary);
         if !is_primary && screens.iter().any(|s| s.device == layout.primary) {
-            set_primary(&layout.primary, &screens)?;
+            set_primary(&layout.primary)?;
         }
     }
     Ok(())
 }
 
-/// Makes `device` the main display: every screen moves so that it sits at (0, 0).
-fn set_primary(device: &str, screens: &[Screen]) -> Result<(), String> {
-    let target = screens
-        .iter()
-        .find(|s| s.device == device)
-        .ok_or_else(|| format!("{device} isn't connected"))?;
-    let (dx, dy) = (target.x, target.y);
-    // Each adapter staged so far, as it was: put back if a later one is refused, so a half-made
-    // change doesn't sit in the registry until the next display change applies it.
-    let mut staged: Vec<([u16; 32], DEVMODEW, bool)> = Vec::new();
-    let undo = |staged: &[([u16; 32], DEVMODEW, bool)]| {
-        for (name, original, was_primary) in staged {
-            let mut flags = CDS_UPDATEREGISTRY | CDS_NORESET;
-            if *was_primary {
-                flags |= CDS_SET_PRIMARY;
-            }
-            unsafe { ChangeDisplaySettingsExW(name.as_ptr(), original, null_mut(), flags, null()) };
-        }
+/// Makes `device` the main display: every screen moves so that it sits at (0, 0). Uses the
+/// display-configuration API (as Windows' Settings does), which also works when the screens hang
+/// off different graphics cards; ChangeDisplaySettingsEx refuses that (error -1). One call
+/// applies the whole layout, so a refusal leaves nothing half-changed.
+fn set_primary(device: &str) -> Result<(), String> {
+    let (paths, mut modes, _) = query(QDC_ONLY_ACTIVE_PATHS)
+        .ok_or_else(|| "Windows didn't report the screen layout".to_string())?;
+    let source_mode = |path: &DISPLAYCONFIG_PATH_INFO| {
+        let index = unsafe { path.sourceInfo.Anonymous.modeInfoIdx } as usize;
+        (index < modes.len() && modes[index].infoType == DISPLAYCONFIG_MODE_INFO_TYPE_SOURCE)
+            .then_some(index)
     };
-    unsafe {
-        let mut index = 0;
-        loop {
-            let mut adapter = DISPLAY_DEVICEW {
-                cb: std::mem::size_of::<DISPLAY_DEVICEW>() as u32,
-                ..Default::default()
-            };
-            if EnumDisplayDevicesW(null(), index, &mut adapter, 0) == 0 {
-                break;
-            }
-            index += 1;
-            if adapter.StateFlags & DISPLAY_DEVICE_ATTACHED_TO_DESKTOP == 0 {
-                continue;
-            }
-            let mut mode = DEVMODEW {
-                dmSize: std::mem::size_of::<DEVMODEW>() as u16,
-                ..Default::default()
-            };
-            if EnumDisplaySettingsW(
-                adapter.DeviceName.as_ptr(),
-                ENUM_CURRENT_SETTINGS,
-                &mut mode,
-            ) == 0
-            {
-                continue;
-            }
-            let mut original = mode;
-            original.dmFields = DM_POSITION;
-            mode.Anonymous1.Anonymous2.dmPosition.x -= dx;
-            mode.Anonymous1.Anonymous2.dmPosition.y -= dy;
-            mode.dmFields = DM_POSITION;
-            let mut flags = CDS_UPDATEREGISTRY | CDS_NORESET;
-            if text(&adapter.DeviceName) == device {
-                flags |= CDS_SET_PRIMARY;
-            }
-            let result = ChangeDisplaySettingsExW(
-                adapter.DeviceName.as_ptr(),
-                &mode,
-                null_mut(),
-                flags,
-                null(),
-            );
-            if result != DISP_CHANGE_SUCCESSFUL {
-                undo(&staged);
-                return Err(format!(
-                    "Windows refused to move {} (error {result})",
-                    text(&adapter.DeviceName)
-                ));
-            }
-            let was_primary = adapter.StateFlags & DISPLAY_DEVICE_PRIMARY_DEVICE != 0;
-            staged.push((adapter.DeviceName, original, was_primary));
-        }
-        // Applies everything staged above at once.
-        let result = ChangeDisplaySettingsExW(null(), null(), null_mut(), 0, null());
-        if result != DISP_CHANGE_SUCCESSFUL {
-            undo(&staged);
-            return Err(format!(
-                "Windows refused to change the main display (error {result})"
-            ));
-        }
+    let target = paths
+        .iter()
+        .find(|path| source_name(path).as_deref() == Some(device))
+        .and_then(source_mode)
+        .ok_or_else(|| format!("{device} isn't connected"))?;
+    let origin = unsafe { modes[target].Anonymous.sourceMode.position };
+    // Duplicated screens share a source mode: move each one once.
+    let mut sources: Vec<usize> = paths.iter().filter_map(source_mode).collect();
+    sources.sort_unstable();
+    sources.dedup();
+    for index in sources {
+        let position = unsafe { &mut modes[index].Anonymous.sourceMode.position };
+        position.x -= origin.x;
+        position.y -= origin.y;
+    }
+    let result = unsafe {
+        SetDisplayConfig(
+            paths.len() as u32,
+            paths.as_ptr(),
+            modes.len() as u32,
+            modes.as_ptr(),
+            SDC_APPLY | SDC_USE_SUPPLIED_DISPLAY_CONFIG | SDC_SAVE_TO_DATABASE | SDC_ALLOW_CHANGES,
+        )
+    };
+    if result != 0 {
+        return Err(format!(
+            "Windows refused to change the main display (error {result})"
+        ));
     }
     Ok(())
+}
+
+/// The Windows device name (`\\.\DISPLAY2`) of a display path's source.
+fn source_name(path: &DISPLAYCONFIG_PATH_INFO) -> Option<String> {
+    let mut source = DISPLAYCONFIG_SOURCE_DEVICE_NAME::default();
+    source.header.r#type = DISPLAYCONFIG_DEVICE_INFO_GET_SOURCE_NAME;
+    source.header.size = std::mem::size_of::<DISPLAYCONFIG_SOURCE_DEVICE_NAME>() as u32;
+    source.header.adapterId = path.sourceInfo.adapterId;
+    source.header.id = path.sourceInfo.id;
+    (unsafe { DisplayConfigGetDeviceInfo(&mut source.header) } == 0)
+        .then(|| text(&source.viewGdiDeviceName))
 }
 
 fn text(wide: &[u16]) -> String {
@@ -438,5 +417,27 @@ mod tests {
         assert!(screens[0].primary);
         assert!(screens[0].name.starts_with("Screen 1"));
         assert_eq!(current(&screens).primary, screens[0].device);
+    }
+
+    /// Changes the real screens for 3 s: `cargo test swap_main_screen -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn swap_main_screen() {
+        let screens = screens();
+        assert!(screens.len() > 1, "needs two screens");
+        let original = current(&screens);
+        let other = screens.iter().find(|s| !s.primary).unwrap().device.clone();
+        let result = apply(&Layout {
+            duplicated: false,
+            primary: other.clone(),
+        });
+        let after = current(&self::screens());
+        std::thread::sleep(std::time::Duration::from_secs(3));
+        let restored = apply(&original);
+        println!("swap: {result:?}, main was {after:?}; restore: {restored:?}");
+        assert_eq!(result, Ok(()));
+        assert_eq!(after.primary, other);
+        assert_eq!(restored, Ok(()));
+        assert_eq!(current(&self::screens()), original);
     }
 }
