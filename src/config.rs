@@ -3,7 +3,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 const DEFAULT_CONFIG: &str = r#"# Game Launcher settings. Paths use single quotes so backslashes stay as-is.
 # Restart the launcher (or use Rescan library) after editing.
@@ -56,15 +56,19 @@ pub struct Config {
     pub systems: Vec<SystemConfig>,
 }
 
-#[derive(Debug, Deserialize)]
+/// Also the shape of games added from the launcher, which state.json stores.
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct PcGame {
     pub name: String,
     pub exe: PathBuf,
     #[serde(default)]
     pub args: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub icon: Option<PathBuf>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hero: Option<PathBuf>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub logo: Option<PathBuf>,
     #[serde(default = "enabled")]
     pub xinput: bool,

@@ -17,6 +17,12 @@ pub struct State {
     pub settings: Settings,
     /// Extra triggers per controller model (SDL GUID), from the Controllers screen.
     pub controller_remaps: HashMap<String, crate::controllers::Profile>,
+    /// PC games added from the Add games screen; config.toml is never rewritten.
+    pub added_games: Vec<crate::config::PcGame>,
+    /// Folders the Add games screen should no longer suggest.
+    pub ignored_folders: BTreeSet<PathBuf>,
+    /// Game id -> Steam app id its art came from (None: Steam has no match). Looked up once.
+    pub art_lookups: HashMap<String, Option<u32>>,
 }
 
 /// User preferences from the Settings page. Volumes are percentages in steps of 10.

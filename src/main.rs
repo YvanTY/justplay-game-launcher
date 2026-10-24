@@ -17,7 +17,7 @@ mod scaled_art;
 mod state;
 
 use std::cell::RefCell;
-use std::collections::{HashMap, VecDeque};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::atomic::Ordering;
@@ -30,7 +30,7 @@ use emulation::Translate;
 use home::{Effect, Home, NavState, SheetItem};
 use input::{InputEvent, PadInfo};
 use launcher::{Ended, Running};
-use library::{Game, Library};
+use library::{Game, Library, Missing};
 use menus::{MenuEffect, Menus, Overlay, Setting};
 use music::Music;
 use state::{ControllerMode, State};
@@ -45,6 +45,8 @@ const HERO_DELAY: Duration = Duration::from_millis(140);
 /// Current and previous background: stepping back is instant, and each extra one would cost
 /// 5-8 MB for the whole session. Others decode again (a few ms) behind HERO_DELAY.
 const HERO_CACHE: usize = 2;
+/// How often plugged/unplugged drives are noticed while the launcher is visible (one cheap call).
+const DRIVE_POLL: Duration = Duration::from_secs(2);
 
 struct App {
     home: Home,
@@ -75,6 +77,11 @@ struct App {
     audio: Option<Rc<Audio>>,
     music: Option<Rc<Music>>,
     audio_timer: Timer,
+    /// Drive letter -> name, including unplugged drives, for "Connect drive E: (name)".
+    drive_labels: BTreeMap<String, String>,
+    /// Connected drives when the library was last loaded; a change reloads it.
+    drive_mask: u32,
+    drive_timer: Timer,
 }
 
 fn main() -> Result<(), slint::PlatformError> {
@@ -84,13 +91,18 @@ fn main() -> Result<(), slint::PlatformError> {
     let _ = std::fs::create_dir_all(&data_dir);
     diag::init(&data_dir);
     let mut problems = Vec::new();
+    let state_path = data_dir.join("state.json");
+    let (state, state_problem) = State::load(&state_path);
+    problems.extend(state_problem);
+    let drive_mask = library::drives::mask();
     let library = match config::load(&data_dir) {
-        Ok(config) => library::load(&config, &data_dir.join("art")),
+        Ok(config) => library::load(&config, &state.added_games, &data_dir),
         Err(e) => {
             problems.push(e);
             Library {
                 games: Vec::new(),
                 warnings: Vec::new(),
+                drive_labels: BTreeMap::new(),
             }
         }
     };
@@ -101,10 +113,6 @@ fn main() -> Result<(), slint::PlatformError> {
             data_dir.join("config.toml").display()
         ));
     }
-    let state_path = data_dir.join("state.json");
-    let (state, state_problem) = State::load(&state_path);
-    problems.extend(state_problem);
-
     let audio = match Audio::start() {
         Ok(audio) => Some(Rc::new(audio)),
         Err(e) => {
@@ -138,6 +146,9 @@ fn main() -> Result<(), slint::PlatformError> {
         audio,
         music,
         audio_timer: Timer::default(),
+        drive_labels: library.drive_labels,
+        drive_mask,
+        drive_timer: Timer::default(),
     }));
 
     {
@@ -166,6 +177,7 @@ fn main() -> Result<(), slint::PlatformError> {
         }
     }
     start_clock(&ui, &app);
+    start_drive_watch(&ui, &app);
 
     ui.on_action({
         let weak = ui.as_weak();
@@ -283,6 +295,27 @@ fn apply_effects(ui: &AppWindow, app_rc: &Rc<RefCell<App>>, effects: &[Effect]) 
                 app.menus.overlay = Overlay::Panel;
                 push_menus(ui, &app);
             }
+            Effect::Remove(game) => remove_game(ui, &mut app, *game),
+            Effect::Unavailable(game) => {
+                // The drive may have been plugged in since the last check.
+                let missing = {
+                    let labels = &app.drive_labels;
+                    library::check(&app.home.games[*game].requires, |l| {
+                        labels.get(&l.to_string()).cloned()
+                    })
+                };
+                match missing {
+                    None => {
+                        app.home.games[*game].missing = None;
+                        start_game(ui, &mut app, *game);
+                    }
+                    Some(missing) => {
+                        let message = missing.play_message(&app.home.games[*game].title);
+                        app.home.games[*game].missing = Some(missing);
+                        app.toasts.show(ui, message);
+                    }
+                }
+            }
             Effect::CloseGame => {
                 // The watcher notices the processes ending and brings the launcher back.
                 if let Some(running) = &app.running {
@@ -361,11 +394,13 @@ fn push_selection(ui: &AppWindow, app: &mut App) {
         .last_played
         .get(&game.id)
         .map(|&t| played_ago(unix_now().saturating_sub(t)));
-    let info = match played {
-        Some(played) => format!("{} · {played}", game.platform),
-        None => game.platform.clone(),
+    let info = match (&game.missing, played) {
+        (Some(missing), _) => format!("{} · {}", game.platform, missing.describe()),
+        (None, Some(played)) => format!("{} · {played}", game.platform),
+        (None, None) => game.platform.clone(),
     };
     ui.set_info(info.into());
+    ui.set_selected_available(game.missing.is_none());
     ui.set_is_favorite(home.is_favorite(index));
     ui.set_selected_running(home.running == Some(index));
     ui.set_backdrop(title_color(&game.title));
@@ -405,6 +440,7 @@ fn push_scalars(ui: &AppWindow, home: &Home) {
                     "Remove from Favorites".into()
                 }
                 SheetItem::ToggleFavorite => "Add to Favorites".into(),
+                SheetItem::Remove => "Remove from library".into(),
             })
             .collect();
         ui.set_sheet_items(ModelRc::new(VecModel::from(items)));
@@ -567,13 +603,20 @@ fn sound_for(
     after: NavState,
     effects: &[Effect],
 ) -> Option<Sound> {
+    if effects.iter().any(|e| matches!(e, Effect::Unavailable(_))) {
+        return Some(Sound::Bump);
+    }
     if effects.iter().any(|e| matches!(e, Effect::Launch(_))) {
         return Some(Sound::Launch);
     }
     if effects.iter().any(|e| {
         matches!(
             e,
-            Effect::Resume | Effect::CloseGame | Effect::ControllerMode(_) | Effect::OpenPanel
+            Effect::Resume
+                | Effect::CloseGame
+                | Effect::ControllerMode(_)
+                | Effect::OpenPanel
+                | Effect::Remove(_)
         )
     }) {
         return Some(Sound::Confirm);
@@ -610,6 +653,7 @@ fn sound_for(
 
 fn go_background(ui: &AppWindow, app: &mut App) {
     app.in_background = true;
+    app.drive_timer.stop();
     update_music(app);
     input::IN_GAME.store(true, Ordering::Relaxed);
     app.hero_timer.stop();
@@ -683,6 +727,8 @@ fn come_back(ui: &AppWindow, app: &mut App) {
     push_scalars(ui, &app.home);
     show_hero(ui, app);
     update_music(app);
+    app.drive_timer.restart();
+    check_drives(ui, app);
 }
 
 fn window_handle(ui: &AppWindow) -> Option<windows_sys::Win32::Foundation::HWND> {
@@ -705,6 +751,13 @@ fn make_tile(game: &Game, images: &mut ImageCache) -> Tile {
         color: title_color(&game.title),
         has_icon: icon.is_some(),
         icon: icon.unwrap_or_default(),
+        available: game.missing.is_none(),
+        // Segoe MDL2: a drive with a cross, or a warning sign.
+        badge: match game.missing {
+            Some(Missing::Drive { .. }) => "\u{E8CD}".into(),
+            Some(Missing::Files(_)) => "\u{E7BA}".into(),
+            None => SharedString::new(),
+        },
     }
 }
 
@@ -1128,37 +1181,117 @@ fn rescan(ui: &AppWindow, app: &mut App) {
             .show(ui, "Close the running game before rescanning".into());
         return;
     }
-    let data_dir = config::data_dir();
-    let config = match config::load(&data_dir) {
-        Ok(config) => config,
+    let warnings = match reload_library(ui, app) {
+        Ok(warnings) => warnings,
         Err(e) => {
             diag::log(&e);
             app.toasts.show(ui, e);
             return;
         }
     };
-    let library = library::load(&config, &data_dir.join("art"));
+    app.toasts.show(
+        ui,
+        format!("Library rescanned: {} games", app.home.games.len()),
+    );
+    if let Some(first) = warnings.first() {
+        let more = if warnings.len() > 1 {
+            format!(" (+{} more)", warnings.len() - 1)
+        } else {
+            String::new()
+        };
+        app.toasts.show(ui, format!("{first}{more}"));
+    }
+}
+
+/// Takes a game added from the launcher out of the library. Its files stay where they are.
+fn remove_game(ui: &AppWindow, app: &mut App, game: usize) {
+    let (title, exe) = {
+        let game = &app.home.games[game];
+        (game.title.clone(), game.launch.exe.clone())
+    };
+    app.home
+        .state
+        .added_games
+        .retain(|g| !(g.name == title && g.exe == exe));
+    if let Err(e) = app.home.state.save(&app.state_path) {
+        app.toasts.show(ui, e);
+        return;
+    }
+    match reload_library(ui, app) {
+        Ok(_) => app.toasts.show(
+            ui,
+            format!("{title} removed from the library (its files are untouched)"),
+        ),
+        Err(e) => app.toasts.show(ui, e),
+    }
+}
+
+/// Reloads config.toml, the added games and the scanners, keeping the user's place.
+/// Returns the warnings for the caller to show (or not).
+fn reload_library(ui: &AppWindow, app: &mut App) -> Result<Vec<String>, String> {
+    let data_dir = config::data_dir();
+    let config = config::load(&data_dir)?;
+    let library = library::load(&config, &app.home.state.added_games, &data_dir);
     for warning in &library.warnings {
         diag::log(warning);
     }
-    let count = library.games.len();
-    let state = std::mem::take(&mut app.home.state);
-    app.home = Home::new(library.games, state);
-    app.shown_hero = None;
+    app.drive_labels = library.drive_labels;
+    app.drive_mask = library::drives::mask();
+    app.home.replace_games(library.games);
     push_tabs(ui, app);
     push_selection(ui, app);
     push_scalars(ui, &app.home);
     show_hero(ui, app);
     update_music(app);
-    app.toasts
-        .show(ui, format!("Library rescanned: {count} games"));
-    if let Some(first) = library.warnings.first() {
-        let more = if library.warnings.len() > 1 {
-            format!(" (+{} more)", library.warnings.len() - 1)
-        } else {
-            String::new()
-        };
-        app.toasts.show(ui, format!("{first}{more}"));
+    Ok(library.warnings)
+}
+
+fn start_drive_watch(ui: &AppWindow, app_rc: &Rc<RefCell<App>>) {
+    let weak = ui.as_weak();
+    let app = app_rc.clone();
+    app_rc
+        .borrow()
+        .drive_timer
+        .start(TimerMode::Repeated, DRIVE_POLL, move || {
+            // A callback already holding the app (e.g. mid-reload) just skips this tick.
+            if let (Some(ui), Ok(mut app)) = (weak.upgrade(), app.try_borrow_mut()) {
+                check_drives(&ui, &mut app);
+            }
+        });
+}
+
+/// A drive was plugged in or out: reload so its games light up or grey out.
+fn check_drives(ui: &AppWindow, app: &mut App) {
+    let mask = library::drives::mask();
+    // Over a running game the reload waits; the next tick after it ends picks the change up.
+    if mask == app.drive_mask || app.in_background || app.home.running.is_some() {
+        return;
+    }
+    let before = app.drive_mask;
+    let describe = |bits: u32, labels: &BTreeMap<String, String>| -> Vec<String> {
+        (0..26u8)
+            .filter(|i| bits & (1 << i) != 0)
+            .map(|i| {
+                let letter = ((b'A' + i) as char).to_string();
+                match labels.get(&letter) {
+                    Some(label) => format!("{letter}: ({label})"),
+                    None => format!("{letter}:"),
+                }
+            })
+            .collect()
+    };
+    let removed = describe(before & !mask, &app.drive_labels);
+    if let Err(e) = reload_library(ui, app) {
+        diag::log(&e);
+        return;
+    }
+    let added = describe(mask & !before, &app.drive_labels);
+    diag::log(&format!("drives changed: +{added:?} -{removed:?}"));
+    for drive in added {
+        app.toasts.show(ui, format!("Drive {drive} connected"));
+    }
+    for drive in removed {
+        app.toasts.show(ui, format!("Drive {drive} disconnected"));
     }
 }
 

@@ -28,6 +28,8 @@ pub enum SheetItem {
     CloseGame,
     ControllerMode,
     ToggleFavorite,
+    /// Only for games added from the launcher; their files are never touched.
+    Remove,
 }
 
 pub struct Sheet {
@@ -50,6 +52,10 @@ pub enum Effect {
     ControllerMode(usize),
     /// The gear in the top bar was chosen: open the quick panel.
     OpenPanel,
+    /// Play was pressed on a greyed-out game (its drive or files are missing).
+    Unavailable(usize),
+    /// Take a launcher-added game out of the library.
+    Remove(usize),
 }
 
 /// Everything a key press can change, compared before/after to pick a feedback sound.
@@ -134,8 +140,11 @@ impl Home {
             vec![SheetItem::Play]
         };
         items.push(SheetItem::ToggleFavorite);
-        // Last, so the other items keep their positions whatever the game.
+        // After the everyday items, so they keep their positions whatever the game.
         items.push(SheetItem::ControllerMode);
+        if self.games[game].removable && Some(game) != self.running {
+            items.push(SheetItem::Remove);
+        }
         items
     }
 
@@ -158,6 +167,7 @@ impl Home {
     fn play(&self, game: Option<usize>) -> Vec<Effect> {
         match game {
             Some(game) if Some(game) == self.running => vec![Effect::Resume],
+            Some(game) if self.games[game].missing.is_some() => vec![Effect::Unavailable(game)],
             Some(game) => vec![Effect::Launch(game)],
             None => Vec::new(),
         }
@@ -224,6 +234,45 @@ impl Home {
         self.current = current_name
             .and_then(|name| self.tabs.iter().position(|t| t.name == name))
             .unwrap_or(0);
+        self.refresh_recent();
+    }
+
+    /// Swaps in a reloaded game list (rescan, a drive plugged in) without moving the user: the
+    /// same tab and the same game stay selected wherever they still exist.
+    pub fn replace_games(&mut self, games: Vec<Game>) {
+        let current_name = self.tab().name.clone();
+        let previous: HashMap<String, (Option<String>, usize)> = self
+            .tabs
+            .iter()
+            .map(|t| {
+                let id = t.games.get(t.focus).map(|&g| self.games[g].id.clone());
+                (t.name.clone(), (id, t.focus))
+            })
+            .collect();
+        let running = self.running.map(|g| self.games[g].id.clone());
+        self.games = games;
+        self.sheet = None;
+        self.tabs = build_tabs(&self.games, &self.state);
+        let games = &self.games;
+        for tab in &mut self.tabs {
+            let Some((id, old_focus)) = previous.get(&tab.name) else {
+                continue;
+            };
+            tab.focus = id
+                .as_ref()
+                .and_then(|id| tab.games.iter().position(|&g| games[g].id == *id))
+                .unwrap_or_else(|| (*old_focus).min(tab.games.len().saturating_sub(1)));
+        }
+        self.current = self
+            .tabs
+            .iter()
+            .position(|t| t.name == current_name)
+            .unwrap_or(0);
+        self.running = running.and_then(|id| self.games.iter().position(|g| g.id == id));
+        self.refresh_recent();
+    }
+
+    fn refresh_recent(&mut self) {
         self.recent = recently_played(&self.games, &self.state);
         self.recent_focus = self.recent_focus.min(self.recent.len().saturating_sub(1));
         if self.zone == Zone::Recent && self.recent.is_empty() {
@@ -330,10 +379,11 @@ impl Home {
                 }
                 self.sheet = None;
                 return match item {
-                    SheetItem::Play => vec![Effect::Launch(game)],
+                    SheetItem::Play => self.play(Some(game)),
                     SheetItem::Resume => vec![Effect::Resume],
                     SheetItem::CloseGame => vec![Effect::CloseGame],
                     SheetItem::ControllerMode => unreachable!("handled above"),
+                    SheetItem::Remove => vec![Effect::Remove(game)],
                     SheetItem::ToggleFavorite => {
                         let id = self.games[game].id.clone();
                         self.state.toggle_favorite(&id);
@@ -461,6 +511,9 @@ mod tests {
             },
             art: Art::default(),
             xinput: false,
+            requires: vec![],
+            missing: None,
+            removable: false,
         }
     }
 
@@ -663,6 +716,56 @@ mod tests {
         home.handle(Action::Right);
         home.handle(Action::Down);
         assert!(!home.gear && home.zone == Zone::Icons);
+    }
+
+    #[test]
+    fn play_on_a_greyed_out_game_does_not_launch() {
+        let mut games = sample();
+        games[1].missing = Some(crate::library::Missing::Drive {
+            letter: 'E',
+            label: None,
+        });
+        let mut home = Home::new(games, State::default());
+        home.current = 1; // PC tab: God of War first
+        assert_eq!(home.handle(Action::Confirm), [Effect::Unavailable(1)]);
+        home.handle(Action::Options);
+        assert_eq!(
+            home.handle(Action::Confirm),
+            [Effect::Unavailable(1)],
+            "sheet Play too"
+        );
+    }
+
+    #[test]
+    fn only_added_games_offer_remove() {
+        let mut games = sample();
+        games[1].removable = true;
+        let mut home = Home::new(games, State::default());
+        home.current = 1; // PC: God of War (added), then TLOU (config)
+        home.handle(Action::Options);
+        assert_eq!(home.sheet_items().last(), Some(&SheetItem::Remove));
+        home.handle(Action::Up);
+        for _ in 0..home.sheet_items().len() {
+            home.handle(Action::Down);
+        }
+        assert_eq!(home.handle(Action::Confirm), [Effect::Remove(1)]);
+        home.handle(Action::Right);
+        home.handle(Action::Options);
+        assert!(!home.sheet_items().contains(&SheetItem::Remove));
+    }
+
+    #[test]
+    fn reloading_keeps_the_tab_and_the_selected_game() {
+        let mut home = Home::new(sample(), State::default());
+        home.current = 2; // PS3
+        home.tabs[2].focus = 1; // God of War III
+        let mut reloaded = sample();
+        // A new game sorts in front of it; the selection must follow God of War III.
+        reloaded.insert(0, game("ps3:NEW", "Beyond", "PS3"));
+        home.replace_games(reloaded);
+        assert_eq!(home.tab().name, "PS3");
+        let selected = home.selected_game().unwrap();
+        assert_eq!(home.games[selected].title, "God of War III");
     }
 
     #[test]

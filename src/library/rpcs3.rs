@@ -4,11 +4,21 @@ use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use super::{Art, Game, Launch, expand_args, sfo};
+use super::cache::Cache;
+use super::{Art, Game, Launch, drives, expand_args, sfo};
 use crate::config::Rpcs3Config;
 
-pub fn scan(config: &Rpcs3Config, warnings: &mut Vec<String>) -> Vec<Game> {
+/// Is `path` absent because its whole drive is unplugged (rather than deleted)?
+fn on_unplugged_drive(path: &Path) -> bool {
+    drives::letter_of(path).is_some_and(|l| !drives::is_connected(l))
+}
+
+pub fn scan(config: &Rpcs3Config, cache: &Cache, warnings: &mut Vec<String>) -> Vec<Game> {
     let Some(root) = config.exe.parent().filter(|_| config.exe.is_file()) else {
+        if on_unplugged_drive(&config.exe) {
+            // RPCS3 itself is on the unplugged drive: show what it had last time, greyed out.
+            return cache.games_on("PS3");
+        }
         warnings.push(format!("RPCS3 not found at {}", config.exe.display()));
         return Vec::new();
     };
@@ -25,6 +35,11 @@ pub fn scan(config: &Rpcs3Config, warnings: &mut Vec<String>) -> Vec<Game> {
                     continue;
                 }
                 let path = PathBuf::from(path.trim_end_matches(['/', '\\']));
+                if !path.exists() && on_unplugged_drive(&path) {
+                    let cached = cache.game(&format!("ps3:{serial}"));
+                    games.extend(cached.or_else(|| offline_game(config, &serial, &path)));
+                    continue;
+                }
                 if !path.exists() {
                     // The last folder name is enough to recognise it on screen; full paths overflow.
                     let name = path.file_name().map_or_else(
@@ -81,6 +96,35 @@ pub fn scan(config: &Rpcs3Config, warnings: &mut Vec<String>) -> Vec<Game> {
     games
 }
 
+/// A game on an unplugged drive that the cache has never seen: named after its folder or file.
+fn offline_game(config: &Rpcs3Config, serial: &str, path: &Path) -> Option<Game> {
+    let args = expand_args(&config.args, path).ok()?;
+    let name = path
+        .file_stem()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| serial.to_string());
+    // RPCS3 names installed folders "[BLUS30405]-Title".
+    let title = name
+        .strip_prefix(&format!("[{serial}]"))
+        .map(|rest| rest.trim_start_matches(['-', ' ']).to_string())
+        .filter(|t| !t.is_empty())
+        .unwrap_or(name);
+    Some(Game {
+        id: format!("ps3:{serial}"),
+        title,
+        platform: "PS3".into(),
+        launch: Launch {
+            exe: config.exe.clone(),
+            args,
+        },
+        art: Art::default(),
+        xinput: false,
+        requires: vec![config.exe.clone(), path.to_path_buf()],
+        missing: None,
+        removable: false,
+    })
+}
+
 fn push_game(
     games: &mut Vec<Game>,
     config: &Rpcs3Config,
@@ -120,6 +164,9 @@ fn push_game(
         },
         // RPCS3 reads pads itself (Yvan configured his there).
         xinput: false,
+        requires: vec![config.exe.clone(), boot_path.to_path_buf()],
+        missing: None,
+        removable: false,
     });
 }
 
@@ -214,7 +261,7 @@ mod tests {
             args: r#"--no-gui "{rom}""#.into(),
         };
         let mut warnings = Vec::new();
-        let games = scan(&config, &mut warnings);
+        let games = scan(&config, &Cache::default(), &mut warnings);
 
         assert_eq!(games.len(), 1);
         assert_eq!(games[0].title, "Dante's Inferno");
@@ -262,7 +309,7 @@ mod tests {
             args: r#""{rom}""#.into(),
         };
         let mut warnings = Vec::new();
-        let games = scan(&config, &mut warnings);
+        let games = scan(&config, &Cache::default(), &mut warnings);
         let ids: Vec<&str> = games.iter().map(|g| g.id.as_str()).collect();
         assert_eq!(ids, ["ps3:NPUB00001"]);
         assert!(games[0].launch.args[0].ends_with("EBOOT.BIN"));

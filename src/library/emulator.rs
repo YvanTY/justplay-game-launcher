@@ -3,13 +3,22 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use super::{Art, Game, Launch, expand_args, find_image};
+use super::cache::Cache;
+use super::{Art, Game, Launch, drives, expand_args, find_image};
 use crate::config::SystemConfig;
 
 /// ROM sets are usually flat or one folder per game; deeper trees are almost always junk.
 const MAX_DEPTH: usize = 2;
 
-pub fn scan(system: &SystemConfig, warnings: &mut Vec<String>) -> Vec<Game> {
+pub fn scan(system: &SystemConfig, cache: &Cache, warnings: &mut Vec<String>) -> Vec<Game> {
+    let unplugged = [&system.emulator, &system.roms]
+        .iter()
+        .filter(|p| !p.exists())
+        .any(|p| drives::letter_of(p).is_some_and(|l| !drives::is_connected(l)));
+    if unplugged {
+        // The emulator or the ROMs are on an unplugged drive: show last time's games, greyed out.
+        return cache.games_on(&system.name);
+    }
     if !system.emulator.is_file() {
         warnings.push(format!(
             "{}: emulator not found at {}",
@@ -67,6 +76,9 @@ pub fn scan(system: &SystemConfig, warnings: &mut Vec<String>) -> Vec<Game> {
             },
             art,
             xinput: system.xinput,
+            requires: vec![system.emulator.clone(), rom.clone()],
+            missing: None,
+            removable: false,
         });
     }
     games
@@ -155,7 +167,7 @@ mod tests {
             art: Some(root.join("art")),
             xinput: false,
         };
-        let mut games = scan(&system, &mut Vec::new());
+        let mut games = scan(&system, &Cache::default(), &mut Vec::new());
         games.sort_by(|a, b| a.title.cmp(&b.title));
 
         assert_eq!(games.len(), 2);
@@ -170,19 +182,46 @@ mod tests {
         assert_eq!(games[1].title, "SotC");
     }
 
-    #[test]
-    fn missing_emulator_is_reported() {
-        let system = SystemConfig {
+    fn switch_at(dir: PathBuf) -> SystemConfig {
+        SystemConfig {
             name: "Switch".into(),
-            emulator: PathBuf::from(r"Z:\nope\Ryujinx.exe"),
+            emulator: dir.join("Ryujinx.exe"),
             args: r#""{rom}""#.into(),
-            roms: PathBuf::from(r"Z:\nope"),
+            roms: dir,
             extensions: vec!["nsp".into()],
             art: None,
             xinput: false,
-        };
+        }
+    }
+
+    #[test]
+    fn missing_emulator_is_reported() {
+        // On a connected drive, so it was deleted or moved rather than unplugged.
+        let system = switch_at(std::env::temp_dir().join("gl-surely-missing-emu"));
         let mut warnings = Vec::new();
-        assert!(scan(&system, &mut warnings).is_empty());
+        assert!(scan(&system, &Cache::default(), &mut warnings).is_empty());
         assert!(warnings[0].starts_with("Switch: emulator not found"));
+    }
+
+    #[test]
+    fn an_unplugged_emulator_drive_serves_last_times_games() {
+        let free = ('G'..='Z')
+            .rev()
+            .find(|&l| !drives::is_connected(l))
+            .unwrap();
+        let system = switch_at(PathBuf::from(format!(r"{free}:\Switch")));
+        let cache: Cache = serde_json::from_str(
+            r#"{"games":[{"id":"Switch:zelda.nsp","title":"Zelda","platform":"Switch",
+                "exe":"x","args":[],"requires":[],"icon":null,"xinput":false}]}"#,
+        )
+        .unwrap();
+        let mut warnings = Vec::new();
+        let games = scan(&system, &cache, &mut warnings);
+        assert_eq!(games.len(), 1);
+        assert_eq!(games[0].title, "Zelda");
+        assert!(
+            warnings.is_empty(),
+            "unplugged is not an error: {warnings:?}"
+        );
     }
 }

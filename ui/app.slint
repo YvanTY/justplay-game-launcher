@@ -9,6 +9,10 @@ export struct Tile {
     color: color,
     icon: image,
     has-icon: bool,
+    // False while the game's drive or files are missing: the tile is greyed out.
+    available: bool,
+    // Segoe MDL2 glyph explaining why (unplugged drive, missing files); empty when available.
+    badge: string,
 }
 
 // A quick-panel tile: big glyph above a label (BuzzTV-style square buttons).
@@ -237,6 +241,27 @@ component ArtTile inherits Rectangle {
         horizontal-alignment: center;
         vertical-alignment: center;
     }
+    if !tile.available: Rectangle {
+        background: #05070bb8;
+        Rectangle {
+            x: parent.width - self.width - 8 * u;
+            y: 8 * u;
+            width: 30 * u;
+            height: 30 * u;
+            border-radius: self.width / 2;
+            background: #000000c0;
+            Text {
+                width: parent.width;
+                height: parent.height;
+                text: tile.badge;
+                font-family: "Segoe MDL2 Assets";
+                font-size: 15 * u;
+                color: #ffffffd9;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+            }
+        }
+    }
     Rectangle {
         border-radius: parent.border-radius;
         border-width: ring ? 4 * u : 0;
@@ -286,6 +311,7 @@ export component AppWindow inherits Window {
     in property <bool> has-logo;
     in property <bool> is-favorite;
     in property <bool> selected-running;
+    in property <bool> selected-available: true;
 
     in property <bool> sheet-open;
     in property <[string]> sheet-items;
@@ -499,6 +525,8 @@ export component AppWindow inherits Window {
             focused: zone == Zone.actions && action-index == 0;
             u: u;
             width: 230 * u;
+            // Still focusable: pressing it says which drive to connect.
+            opacity: selected-available ? 1 : 0.45;
             HorizontalLayout {
                 alignment: center;
                 spacing: 12 * u;
