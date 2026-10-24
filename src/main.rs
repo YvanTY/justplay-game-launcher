@@ -2,6 +2,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod audio;
+mod background;
 mod config;
 mod controllers;
 mod diag;
@@ -13,11 +14,13 @@ mod library;
 mod menus;
 mod music;
 mod nav;
+mod net;
 mod scaled_art;
 mod state;
+mod steam;
 
 use std::cell::RefCell;
-use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::atomic::Ordering;
@@ -26,6 +29,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use slint::{Color, Image, ModelRc, SharedString, Timer, TimerMode, VecModel};
 
 use audio::{Audio, Sound};
+use background::{ArtJob, ArtOutcome};
 use emulation::Translate;
 use home::{Effect, Home, NavState, SheetItem};
 use input::{InputEvent, PadInfo};
@@ -82,6 +86,12 @@ struct App {
     /// Connected drives when the library was last loaded; a change reloads it.
     drive_mask: u32,
     drive_timer: Timer,
+    /// Results from the worker threads (backgrounds, art), drained on the UI thread.
+    background: std::sync::mpsc::Receiver<background::Event>,
+    hero_loader: std::sync::mpsc::Sender<(PathBuf, f32)>,
+    art_fetcher: std::sync::mpsc::Sender<ArtJob>,
+    /// Game ids whose Steam lookup is queued or running.
+    art_pending: HashSet<String>,
 }
 
 fn main() -> Result<(), slint::PlatformError> {
@@ -124,6 +134,7 @@ fn main() -> Result<(), slint::PlatformError> {
         .as_ref()
         .map(|audio| Rc::new(Music::start(audio.device())));
     let (controller_sender, controller_events) = std::sync::mpsc::channel::<InputEvent>();
+    let (notifier, background_events) = background::Notifier::new(ui.as_weak());
     let app = Rc::new(RefCell::new(App {
         home: Home::new(library.games, state),
         images: ImageCache::default(),
@@ -149,6 +160,10 @@ fn main() -> Result<(), slint::PlatformError> {
         drive_labels: library.drive_labels,
         drive_mask,
         drive_timer: Timer::default(),
+        background: background_events,
+        hero_loader: background::spawn_hero_loader(notifier.clone()),
+        art_fetcher: background::spawn_art_fetcher(notifier),
+        art_pending: HashSet::new(),
     }));
 
     {
@@ -163,6 +178,7 @@ fn main() -> Result<(), slint::PlatformError> {
         push_scalars(&ui, &app.home);
         show_hero(&ui, &mut app);
         update_music(&app);
+        queue_art_lookups(&mut app);
         problems.append(&mut app.images.problems);
         for problem in &problems {
             diag::log(problem);
@@ -234,6 +250,11 @@ fn main() -> Result<(), slint::PlatformError> {
         let weak = ui.as_weak();
         let app = app.clone();
         move || cancel_back_hold(&weak.unwrap(), &mut app.borrow_mut())
+    });
+    ui.on_background_event({
+        let weak = ui.as_weak();
+        let app = app.clone();
+        move || drain_background(&weak.unwrap(), &mut app.borrow_mut())
     });
     ui.on_controller_event({
         let weak = ui.as_weak();
@@ -449,11 +470,13 @@ fn push_scalars(ui: &AppWindow, home: &Home) {
 }
 
 /// Crossfades to the selected game's background: its hero art, else its icon, else a color.
+/// Uncached art decodes on the background thread; the previous art stays up until it arrives.
 fn show_hero(ui: &AppWindow, app: &mut App) {
     let App {
         home,
         images,
         shown_hero,
+        hero_loader,
         ..
     } = app;
     let path = home
@@ -463,20 +486,146 @@ fn show_hero(ui: &AppWindow, app: &mut App) {
     if path == *shown_hero {
         return;
     }
-    match path.as_deref().and_then(|p| images.hero(p)) {
-        Some(image) => {
-            if ui.get_show_a() {
-                ui.set_hero_b(image);
-                ui.set_show_a(false);
-            } else {
-                ui.set_hero_a(image);
-                ui.set_show_a(true);
-            }
-            ui.set_has_hero(true);
+    shown_hero.clone_from(&path);
+    let Some(path) = path else {
+        ui.set_has_hero(false);
+        return;
+    };
+    match images.cached_hero(&path) {
+        Some(image) => display_hero(ui, image),
+        None => {
+            // Only fails if the decoder thread is gone; the old art then simply stays.
+            let _ = hero_loader.send((path, scaled_art::screen_scale()));
         }
-        None => ui.set_has_hero(false),
     }
-    *shown_hero = path;
+}
+
+fn display_hero(ui: &AppWindow, image: Image) {
+    if ui.get_show_a() {
+        ui.set_hero_b(image);
+        ui.set_show_a(false);
+    } else {
+        ui.set_hero_a(image);
+        ui.set_show_a(true);
+    }
+    ui.set_has_hero(true);
+}
+
+/// Results from the worker threads.
+fn drain_background(ui: &AppWindow, app: &mut App) {
+    while let Ok(event) = app.background.try_recv() {
+        match event {
+            background::Event::Hero { path, pixels } => hero_loaded(ui, app, path, pixels),
+            background::Event::ArtFile { id } => refresh_art(ui, app, &id),
+            background::Event::Art { id, outcome } => art_fetched(ui, app, id, outcome),
+        }
+    }
+    for problem in app.images.problems.drain(..) {
+        diag::log(&problem);
+    }
+}
+
+fn hero_loaded(ui: &AppWindow, app: &mut App, path: PathBuf, pixels: Option<scaled_art::Pixels>) {
+    // A game took the screen meanwhile: its memory matters more than this picture.
+    if app.in_background {
+        return;
+    }
+    // The decoder can't read every format (e.g. WebP); Slint can, at full size.
+    let image = match pixels {
+        Some(pixels) => Some(pixels.into_image()),
+        None => app.images.load(&path),
+    };
+    let wanted = app.shown_hero.as_ref() == Some(&path);
+    match image {
+        Some(image) => {
+            app.images.insert_hero(path, image.clone());
+            if wanted {
+                display_hero(ui, image);
+            }
+        }
+        None if wanted => ui.set_has_hero(false),
+        None => {}
+    }
+}
+
+/// PC games missing an icon, background or logo get one Steam lookup each; the answer is
+/// remembered in state.json, so a game Steam doesn't know isn't searched again every start.
+fn queue_art_lookups(app: &mut App) {
+    let art_dir = config::data_dir().join("art");
+    let App {
+        home,
+        art_fetcher,
+        art_pending,
+        ..
+    } = app;
+    for game in &home.games {
+        if game.platform != "PC"
+            || home.state.art_lookups.contains_key(&game.id)
+            || art_pending.contains(&game.id)
+        {
+            continue;
+        }
+        let wanted: Vec<&'static str> = [
+            (game.art.icon.is_none(), "icon.jpg"),
+            (game.art.hero.is_none(), "hero.jpg"),
+            (game.art.logo.is_none(), "logo.png"),
+        ]
+        .into_iter()
+        .filter_map(|(missing, file)| missing.then_some(file))
+        .collect();
+        if wanted.is_empty() {
+            continue;
+        }
+        let job = ArtJob {
+            id: game.id.clone(),
+            title: game.title.clone(),
+            dir: art_dir.join(library::safe_file_name(&game.title)),
+            wanted,
+        };
+        if art_fetcher.send(job).is_ok() {
+            art_pending.insert(game.id.clone());
+        }
+    }
+}
+
+fn art_fetched(ui: &AppWindow, app: &mut App, id: String, outcome: ArtOutcome) {
+    app.art_pending.remove(&id);
+    let lookup = match outcome {
+        ArtOutcome::Found {
+            app: steam_app,
+            saved,
+        } => {
+            // Each image was already shown as it arrived (ArtFile).
+            diag::log(&format!(
+                "art for {id}: Steam app {steam_app}, {saved} new images"
+            ));
+            Some(steam_app)
+        }
+        ArtOutcome::NoMatch => {
+            diag::log(&format!("art for {id}: no exact match on Steam"));
+            None
+        }
+        ArtOutcome::Failed(e) => {
+            // Not remembered, so the next start tries again.
+            diag::log(&format!("art for {id}: {e}"));
+            return;
+        }
+    };
+    app.home.state.art_lookups.insert(id, lookup);
+    if let Err(e) = app.home.state.save(&app.state_path) {
+        app.toasts.show(ui, e);
+    }
+}
+
+/// New files landed in a game's art folder: show them without reloading the library.
+fn refresh_art(ui: &AppWindow, app: &mut App, id: &str) {
+    let art_dir = config::data_dir().join("art");
+    if let Some(game) = app.home.games.iter_mut().find(|g| g.id == id) {
+        library::apply_art_folder(game, &art_dir);
+    }
+    push_tabs(ui, app);
+    push_selection(ui, app);
+    show_hero(ui, app);
 }
 
 fn start_game(ui: &AppWindow, app: &mut App, game: usize) {
@@ -791,18 +940,20 @@ impl ImageCache {
         image
     }
 
-    fn hero(&mut self, path: &Path) -> Option<Image> {
-        if let Some(pos) = self.heroes.iter().position(|(p, _)| p == path) {
-            let entry = self.heroes.remove(pos)?;
-            self.heroes.push_back(entry.clone());
-            return Some(entry.1);
-        }
-        let image = self.load(path)?;
+    /// A recently shown background, moved to the fresh end of the cache.
+    fn cached_hero(&mut self, path: &Path) -> Option<Image> {
+        let pos = self.heroes.iter().position(|(p, _)| p == path)?;
+        let entry = self.heroes.remove(pos)?;
+        self.heroes.push_back(entry.clone());
+        Some(entry.1)
+    }
+
+    fn insert_hero(&mut self, path: PathBuf, image: Image) {
+        self.heroes.retain(|(p, _)| *p != path);
         if self.heroes.len() == HERO_CACHE {
             self.heroes.pop_front();
         }
-        self.heroes.push_back((path.to_path_buf(), image.clone()));
-        Some(image)
+        self.heroes.push_back((path, image));
     }
 
     fn load(&mut self, path: &Path) -> Option<Image> {
@@ -1243,6 +1394,7 @@ fn reload_library(ui: &AppWindow, app: &mut App) -> Result<Vec<String>, String> 
     push_scalars(ui, &app.home);
     show_hero(ui, app);
     update_music(app);
+    queue_art_lookups(app);
     Ok(library.warnings)
 }
 

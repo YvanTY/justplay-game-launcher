@@ -347,6 +347,8 @@ export component AppWindow inherits Window {
     callback back-hold-tick();
     // Empty message: the game ended normally; otherwise why it failed.
     callback game-ended(string);
+    // A worker thread (background decoding, art download) has results waiting.
+    callback background-event();
 
     // 1px at 1080p; everything scales with the screen.
     property <length> u: min(root.width / 1920, root.height / 1080);

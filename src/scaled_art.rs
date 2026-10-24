@@ -1,6 +1,7 @@
-//! Small art (icons, logos) decoded at the largest size it is drawn on this screen, so a
-//! 600x900 cover shown in a 164 px tile doesn't keep 2 MB of pixels, plus its GPU copy,
-//! for the whole session. Art is never enlarged, and never made smaller than it is drawn.
+//! Art decoded at the largest size it is drawn on this screen, so a 600x900 cover shown in a
+//! 164 px tile doesn't keep 2 MB of pixels (plus its GPU copy) for the whole session, and a 4K
+//! background costs no more than the screen needs. Art is never enlarged, and never made smaller
+//! than it is drawn.
 
 use std::path::Path;
 
@@ -16,6 +17,8 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
 pub enum Kind {
     Icon,
     Logo,
+    /// The full-screen background.
+    Hero,
 }
 
 impl Kind {
@@ -23,6 +26,7 @@ impl Kind {
         match self {
             Kind::Icon => ICON_SLOTS,
             Kind::Logo => LOGO_SLOTS,
+            Kind::Hero => HERO_SLOTS,
         }
     }
 }
@@ -54,6 +58,29 @@ const LOGO_SLOTS: &[Slot] = &[Slot {
     height: 260.0,
     cover: false,
 }];
+
+/// The whole window, filled and cropped.
+const HERO_SLOTS: &[Slot] = &[Slot {
+    width: 1920.0,
+    height: 1080.0,
+    cover: true,
+}];
+
+/// Decoded pixels that can cross threads (a Slint Image can't), so backgrounds decode off the
+/// UI thread and only become an Image once back on it.
+pub enum Pixels {
+    Rgb(SharedPixelBuffer<Rgb8Pixel>),
+    Rgba(SharedPixelBuffer<Rgba8Pixel>),
+}
+
+impl Pixels {
+    pub fn into_image(self) -> Image {
+        match self {
+            Pixels::Rgb(buffer) => Image::from_rgb8(buffer),
+            Pixels::Rgba(buffer) => Image::from_rgba8(buffer),
+        }
+    }
+}
 
 /// Screen pixels per UI unit: 1.0 at 1080p, 2.0 at 4K. Measured on the bounding box of all
 /// monitors, which is never smaller than any one of them, so a TV next to the PC screen counts.
@@ -91,6 +118,11 @@ fn target_size(width: u32, height: u32, slots: &[Slot], scale: f32) -> Option<(u
 
 /// None when the file can't be decoded here (e.g. WebP); the caller falls back to Slint.
 pub fn load(path: &Path, kind: Kind, scale: f32) -> Option<Image> {
+    decode(path, kind, scale).map(Pixels::into_image)
+}
+
+/// Safe to call from any thread.
+pub fn decode(path: &Path, kind: Kind, scale: f32) -> Option<Pixels> {
     let decoded = image::ImageReader::open(path)
         .ok()?
         .with_guessed_format()
@@ -105,14 +137,14 @@ pub fn load(path: &Path, kind: Kind, scale: f32) -> Option<Image> {
     };
     Some(if has_alpha {
         let rgba = decoded.into_rgba8();
-        Image::from_rgba8(SharedPixelBuffer::<Rgba8Pixel>::clone_from_slice(
+        Pixels::Rgba(SharedPixelBuffer::<Rgba8Pixel>::clone_from_slice(
             rgba.as_raw(),
             rgba.width(),
             rgba.height(),
         ))
     } else {
         let rgb = decoded.into_rgb8();
-        Image::from_rgb8(SharedPixelBuffer::<Rgb8Pixel>::clone_from_slice(
+        Pixels::Rgb(SharedPixelBuffer::<Rgb8Pixel>::clone_from_slice(
             rgb.as_raw(),
             rgb.width(),
             rgb.height(),
@@ -156,6 +188,23 @@ mod tests {
         assert_eq!(target_size(600, 900, ICON_SLOTS, 1.0), Some((300, 450)));
         // On a 4K screen the same card is drawn at 600 px wide: keep the original.
         assert_eq!(target_size(600, 900, ICON_SLOTS, 2.0), None);
+    }
+
+    #[test]
+    fn backgrounds_shrink_to_fill_the_screen() {
+        // Steam's 3840x1240 background fills a 1080p screen at 3345x1080 (cropped at the sides).
+        let (w, h) = target_size(3840, 1240, HERO_SLOTS, 1.0).unwrap();
+        assert!(h >= 1080 && (1920..3840).contains(&w), "{w}x{h}");
+        assert_eq!(
+            target_size(3840, 1240, HERO_SLOTS, 2.0),
+            None,
+            "4K keeps it all"
+        );
+        assert_eq!(
+            target_size(1920, 620, HERO_SLOTS, 1.0),
+            None,
+            "never enlarged"
+        );
     }
 
     #[test]
