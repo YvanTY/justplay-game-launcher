@@ -48,6 +48,8 @@ pub enum Effect {
     CloseGame,
     /// The game's controller mode changed (applied at once if it is running).
     ControllerMode(usize),
+    /// The gear in the top bar was chosen: open the quick panel.
+    OpenPanel,
 }
 
 /// Everything a key press can change, compared before/after to pick a feedback sound.
@@ -61,6 +63,7 @@ pub struct NavState {
     pub recent_focus: usize,
     pub sheet_open: bool,
     pub sheet_focus: usize,
+    pub gear: bool,
 }
 
 pub struct Home {
@@ -74,6 +77,8 @@ pub struct Home {
     pub recent: Vec<usize>,
     pub recent_focus: usize,
     pub sheet: Option<Sheet>,
+    /// In the tab bar, the cursor sits on the gear (past the last tab).
+    pub gear: bool,
     /// The game currently running, if any.
     pub running: Option<usize>,
 }
@@ -90,6 +95,7 @@ impl Home {
             recent: Vec::new(),
             recent_focus: 0,
             sheet: None,
+            gear: false,
             running: None,
         };
         home.rebuild();
@@ -105,6 +111,7 @@ impl Home {
             recent_focus: self.recent_focus,
             sheet_open: self.sheet.is_some(),
             sheet_focus: self.sheet.as_ref().map_or(0, |s| s.focus),
+            gear: self.gear,
         }
     }
 
@@ -238,9 +245,23 @@ impl Home {
         }
         let has_games = !self.tab().games.is_empty();
         match (self.zone, action) {
+            // The gear sits after the last tab: Right reaches it, Left comes back.
+            (Zone::Tabs, Action::Left) if self.gear => {
+                self.gear = false;
+                Vec::new()
+            }
+            (Zone::Tabs, Action::Confirm) if self.gear => vec![Effect::OpenPanel],
+            (Zone::Tabs, Action::Right) if self.gear => Vec::new(),
+            (Zone::Tabs, Action::Right) if self.current + 1 == self.tabs.len() => {
+                self.gear = true;
+                Vec::new()
+            }
             (Zone::Tabs, Action::Left) => self.switch_tab(-1),
             (Zone::Tabs, Action::Right) => self.switch_tab(1),
-            (Zone::Tabs, Action::Down | Action::Confirm) => self.go(Zone::Icons),
+            (Zone::Tabs, Action::Down | Action::Confirm) => {
+                self.gear = false;
+                self.go(Zone::Icons)
+            }
 
             (Zone::Icons, Action::Left) => self.move_focus(-1),
             (Zone::Icons, Action::Right) => self.move_focus(1),
@@ -339,6 +360,7 @@ impl Home {
     }
 
     fn switch_tab(&mut self, delta: isize) -> Vec<Effect> {
+        self.gear = false;
         if self.tabs.len() < 2 {
             return Vec::new();
         }
@@ -623,6 +645,24 @@ mod tests {
             .controller_modes
             .insert("ps3:BLUS30405".into(), ControllerMode::Xbox);
         assert_eq!(home.controller_mode(0), ControllerMode::Xbox);
+    }
+
+    #[test]
+    fn gear_is_reachable_from_the_last_tab() {
+        let mut home = Home::new(sample(), State::default());
+        home.handle(Action::Up); // tab bar, on Home
+        home.handle(Action::Right); // PC
+        home.handle(Action::Right); // PS3, the last tab
+        assert!(!home.gear);
+        home.handle(Action::Right);
+        assert!(home.gear, "Right past the last tab lands on the gear");
+        assert_eq!(home.handle(Action::Confirm), [Effect::OpenPanel]);
+        home.handle(Action::Left);
+        assert!(!home.gear);
+        assert_eq!(home.current, 2, "back on the last tab");
+        home.handle(Action::Right);
+        home.handle(Action::Down);
+        assert!(!home.gear && home.zone == Zone::Icons);
     }
 
     #[test]

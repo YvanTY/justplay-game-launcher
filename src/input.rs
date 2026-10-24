@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 use sdl3_sys::everything::*;
 
 use crate::Action;
-use crate::controllers::{self, REMAPS, Trigger, XButton};
+use crate::controllers::{self, Direction, REMAPS, Stick, Trigger, XButton};
 use crate::diag;
 use crate::emulation::{self, Translate, VirtualPad};
 
@@ -26,6 +26,8 @@ pub enum InputEvent {
     Captured(Trigger),
     /// Nothing was pressed in time; the screen stops waiting.
     CaptureTimedOut,
+    /// B (Back) was let go: ends a hold-to-exit in the Controllers screen.
+    BackReleased,
 }
 
 #[derive(Clone, Debug)]
@@ -379,6 +381,9 @@ impl<F: Fn(InputEvent)> Pads<F> {
             self.press(source, action);
         } else {
             self.release(source);
+            if action == Action::Back {
+                (self.emit)(InputEvent::BackReleased);
+            }
         }
     }
 
@@ -772,9 +777,26 @@ fn held_mask(pad: *mut SDL_Gamepad) -> u32 {
         .iter()
         .enumerate()
         .fold(0, |mask, (i, button)| {
-            let held = match (button.sdl_button(), button.trigger_axis()) {
-                (Some(b), _) => unsafe { SDL_GetGamepadButton(pad, b) },
-                (_, Some(axis)) => (unsafe { SDL_GetGamepadAxis(pad, axis) }) > TRIGGER_DOWN,
+            let held = match (
+                button.sdl_button(),
+                button.trigger_axis(),
+                button.stick_direction(),
+            ) {
+                (Some(b), _, _) => unsafe { SDL_GetGamepadButton(pad, b) },
+                (_, Some(axis), _) => (unsafe { SDL_GetGamepadAxis(pad, axis) }) > TRIGGER_DOWN,
+                (_, _, Some((stick, direction))) => {
+                    let (x_axis, y_axis) = match stick {
+                        Stick::Left => (SDL_GAMEPAD_AXIS_LEFTX, SDL_GAMEPAD_AXIS_LEFTY),
+                        Stick::Right => (SDL_GAMEPAD_AXIS_RIGHTX, SDL_GAMEPAD_AXIS_RIGHTY),
+                    };
+                    let (x, y) = unsafe {
+                        (
+                            SDL_GetGamepadAxis(pad, x_axis),
+                            SDL_GetGamepadAxis(pad, y_axis),
+                        )
+                    };
+                    controllers::stick_pushed(x, y, direction)
+                }
                 _ => false,
             };
             if held { mask | (1 << i) } else { mask }
@@ -823,10 +845,24 @@ fn apply_remaps(report: &mut vigem_client::XGamepad, guid: &str, source: *mut SD
         if !active {
             continue;
         }
-        match (button.xinput_flag(), button) {
-            (Some(flag), _) => report.buttons.raw |= flag,
-            (None, XButton::Lt) => report.left_trigger = u8::MAX,
-            (None, _) => report.right_trigger = u8::MAX,
+        if let Some(flag) = button.xinput_flag() {
+            report.buttons.raw |= flag;
+        } else if let Some((stick, direction)) = button.stick_direction() {
+            // Full deflection; XInput's y axis points up.
+            let (x, y) = match stick {
+                Stick::Left => (&mut report.thumb_lx, &mut report.thumb_ly),
+                Stick::Right => (&mut report.thumb_rx, &mut report.thumb_ry),
+            };
+            match direction {
+                Direction::Up => *y = i16::MAX,
+                Direction::Down => *y = i16::MIN,
+                Direction::Left => *x = i16::MIN,
+                Direction::Right => *x = i16::MAX,
+            }
+        } else if *button == XButton::Lt {
+            report.left_trigger = u8::MAX;
+        } else {
+            report.right_trigger = u8::MAX;
         }
     }
 }

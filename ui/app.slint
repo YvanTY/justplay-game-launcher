@@ -43,70 +43,163 @@ component PanelTile inherits Rectangle {
 }
 
 export struct RemapRow {
+    badge: string,
     label: string,
     value: string,
     column: int,
     row: int,
 }
 
-// One button on the controller picture: blue glow when selected in the lists, white while held.
+// A round or rounded key on the controller picture. Selected: blue glow; held: white.
 component PadKey inherits Rectangle {
     in property <bool> lit;
     in property <bool> pressed;
     in property <string> text;
-    background: pressed ? white : lit ? #2d8cff : #ffffff1f;
-    border-width: 2px;
-    border-color: lit ? #9fd0ff : #ffffff40;
-    drop-shadow-blur: lit ? 26px : 0;
-    drop-shadow-color: #2d8cffd0;
+    in property <color> text-color: white;
+    in property <string> font: "Segoe UI";
+    background: pressed ? white : lit ? #2d8cff : @linear-gradient(180deg, #3a4357 0%, #232a38 100%);
+    border-width: lit ? 2px : 1px;
+    border-color: lit ? #a9d4ff : #ffffff2e;
+    drop-shadow-blur: lit ? 28px : 6px;
+    drop-shadow-color: lit ? #2d8cffd8 : #00000080;
+    drop-shadow-offset-y: lit ? 0 : 2px;
     animate background { duration: 90ms; }
     Text {
         width: parent.width;
         height: parent.height;
         text: text;
-        color: pressed ? black : white;
-        font-size: parent.height * 0.42;
-        font-weight: 700;
+        color: pressed ? black : lit ? white : text-color;
+        font-family: font;
+        font-size: parent.height * 0.44;
+        font-weight: 800;
         horizontal-alignment: center;
         vertical-alignment: center;
     }
 }
 
-// An Xbox-layout controller drawn in a 1000 x 640 design space; button order matches
-// controllers::ALL (left column, D-pad box, right column).
+// A thumbstick: dark well, raised cap, and an arrow on each side for its four directions.
+component Thumbstick inherits Rectangle {
+    in property <length> s;
+    in property <string> label;
+    in property <bool> click-lit;
+    in property <bool> click-pressed;
+    // up, left, right, down
+    in property <[bool]> dir-lit;
+    in property <[bool]> dir-pressed;
+    width: 136 * s;
+    height: 136 * s;
+    Rectangle {
+        border-radius: self.width / 2;
+        background: #0b0f17;
+        border-width: 1px;
+        border-color: #ffffff1f;
+    }
+
+    PadKey {
+        x: 18 * s;
+        y: 18 * s;
+        width: 100 * s;
+        height: 100 * s;
+        border-radius: self.width / 2;
+        text: label;
+        lit: click-lit;
+        pressed: click-pressed;
+    }
+
+    for arrow[i] in [
+        { x: 54, y: -14, glyph: "\u{EDDB}" },
+        { x: -14, y: 54, glyph: "\u{EDD9}" },
+        { x: 122, y: 54, glyph: "\u{EDDA}" },
+        { x: 54, y: 122, glyph: "\u{EDDC}" },
+    ]: Text {
+        x: arrow.x * s;
+        y: arrow.y * s;
+        width: 28 * s;
+        height: 28 * s;
+        text: arrow.glyph;
+        font-family: "Segoe MDL2 Assets";
+        font-size: 16 * s;
+        color: dir-pressed[i] ? white : dir-lit[i] ? #4da3ff : #ffffff33;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+}
+
+// An Xbox-layout controller in a 1000 x 640 design space. Button order matches
+// controllers::ALL: left column 0-9, D-pad box 10-13, right column 14-24.
 component ControllerPicture inherits Rectangle {
     in property <int> highlight;
     in property <[bool]> live;
     property <length> s: self.width / 1000;
     Path {
-        y: 80 * s;
+        y: 70 * s;
         width: parent.width;
-        height: 560 * s;
+        height: 570 * s;
         viewbox-width: 1000;
-        viewbox-height: 560;
-        commands: "M 250 10 C 330 -10 670 -10 750 10 C 840 30 900 100 930 230 C 965 380 985 480 930 530 C 880 575 800 540 740 440 C 715 400 690 380 640 380 L 360 380 C 310 380 285 400 260 440 C 200 540 120 575 70 530 C 15 480 35 380 70 230 C 100 100 160 30 250 10 Z";
-        fill: #ffffff0f;
-        stroke: #ffffff3d;
+        viewbox-height: 570;
+        commands: "M 250 10 C 330 -10 670 -10 750 10 C 840 30 905 100 935 235 C 970 390 990 495 935 545 C 885 590 800 555 740 455 C 715 415 690 395 640 395 L 360 395 C 310 395 285 415 260 455 C 200 555 115 590 65 545 C 10 495 30 390 65 235 C 95 100 160 30 250 10 Z";
+        fill: @linear-gradient(180deg, #2b3243 0%, #1a1f2b 60%, #12161f 100%);
+        stroke: #ffffff2b;
         stroke-width: 2px;
+    }
+
+    // Soft highlight along the top edge for depth.
+    Path {
+        y: 76 * s;
+        width: parent.width;
+        height: 120 * s;
+        viewbox-width: 1000;
+        viewbox-height: 120;
+        commands: "M 260 14 C 340 0 660 0 740 14 C 800 26 840 60 860 110 C 720 70 280 70 140 110 C 160 60 200 26 260 14 Z";
+        fill: #ffffff0c;
     }
 
     PadKey { x: 230 * s; y: 0; width: 150 * s; height: 34 * s; border-radius: 14 * s; text: "LT"; lit: highlight == 0; pressed: live[0]; }
     PadKey { x: 210 * s; y: 44 * s; width: 190 * s; height: 30 * s; border-radius: 12 * s; text: "LB"; lit: highlight == 1; pressed: live[1]; }
     PadKey { x: 424 * s; y: 300 * s; width: 32 * s; height: 32 * s; border-radius: 16 * s; text: ""; lit: highlight == 2; pressed: live[2]; }
     PadKey { x: 544 * s; y: 300 * s; width: 32 * s; height: 32 * s; border-radius: 16 * s; text: ""; lit: highlight == 3; pressed: live[3]; }
-    PadKey { x: 468 * s; y: 196 * s; width: 64 * s; height: 64 * s; border-radius: 32 * s; text: ""; lit: highlight == 4; pressed: live[4]; }
-    PadKey { x: 242 * s; y: 232 * s; width: 116 * s; height: 116 * s; border-radius: 58 * s; text: "L3"; lit: highlight == 5; pressed: live[5]; }
-    PadKey { x: 372 * s; y: 388 * s; width: 36 * s; height: 42 * s; border-radius: 6 * s; text: ""; lit: highlight == 6; pressed: live[6]; }
-    PadKey { x: 328 * s; y: 430 * s; width: 44 * s; height: 36 * s; border-radius: 6 * s; text: ""; lit: highlight == 7; pressed: live[7]; }
-    PadKey { x: 408 * s; y: 430 * s; width: 44 * s; height: 36 * s; border-radius: 6 * s; text: ""; lit: highlight == 8; pressed: live[8]; }
-    PadKey { x: 372 * s; y: 466 * s; width: 36 * s; height: 42 * s; border-radius: 6 * s; text: ""; lit: highlight == 9; pressed: live[9]; }
-    PadKey { x: 620 * s; y: 0; width: 150 * s; height: 34 * s; border-radius: 14 * s; text: "RT"; lit: highlight == 10; pressed: live[10]; }
-    PadKey { x: 600 * s; y: 44 * s; width: 190 * s; height: 30 * s; border-radius: 12 * s; text: "RB"; lit: highlight == 11; pressed: live[11]; }
-    PadKey { x: 690 * s; y: 200 * s; width: 60 * s; height: 60 * s; border-radius: 30 * s; text: "Y"; lit: highlight == 12; pressed: live[12]; }
-    PadKey { x: 630 * s; y: 260 * s; width: 60 * s; height: 60 * s; border-radius: 30 * s; text: "X"; lit: highlight == 13; pressed: live[13]; }
-    PadKey { x: 750 * s; y: 260 * s; width: 60 * s; height: 60 * s; border-radius: 30 * s; text: "B"; lit: highlight == 14; pressed: live[14]; }
-    PadKey { x: 690 * s; y: 320 * s; width: 60 * s; height: 60 * s; border-radius: 30 * s; text: "A"; lit: highlight == 15; pressed: live[15]; }
-    PadKey { x: 562 * s; y: 392 * s; width: 116 * s; height: 116 * s; border-radius: 58 * s; text: "R3"; lit: highlight == 16; pressed: live[16]; }
+    PadKey { x: 470 * s; y: 198 * s; width: 60 * s; height: 60 * s; border-radius: 30 * s; text: "◉"; text-color: #ffffff99; lit: highlight == 4; pressed: live[4]; }
+    Thumbstick {
+        x: 232 * s;
+        y: 222 * s;
+        s: s;
+        label: "L3";
+        click-lit: highlight == 5;
+        click-pressed: live[5];
+        dir-lit: [highlight == 6, highlight == 7, highlight == 8, highlight == 9];
+        dir-pressed: [live[6], live[7], live[8], live[9]];
+    }
+
+    // D-pad: a cross with four separately lit arms.
+    Rectangle {
+        x: 330 * s;
+        y: 388 * s;
+        width: 120 * s;
+        height: 120 * s;
+        Rectangle { x: 40 * s; width: 40 * s; border-radius: 6 * s; background: #0b0f17; }
+        Rectangle { y: 40 * s; height: 40 * s; border-radius: 6 * s; background: #0b0f17; }
+        PadKey { x: 42 * s; y: 2 * s; width: 36 * s; height: 40 * s; border-radius: 5 * s; text: "\u{EDDB}"; font: "Segoe MDL2 Assets"; lit: highlight == 10; pressed: live[10]; }
+        PadKey { x: 2 * s; y: 42 * s; width: 40 * s; height: 36 * s; border-radius: 5 * s; text: "\u{EDD9}"; font: "Segoe MDL2 Assets"; lit: highlight == 11; pressed: live[11]; }
+        PadKey { x: 78 * s; y: 42 * s; width: 40 * s; height: 36 * s; border-radius: 5 * s; text: "\u{EDDA}"; font: "Segoe MDL2 Assets"; lit: highlight == 12; pressed: live[12]; }
+        PadKey { x: 42 * s; y: 78 * s; width: 36 * s; height: 40 * s; border-radius: 5 * s; text: "\u{EDDC}"; font: "Segoe MDL2 Assets"; lit: highlight == 13; pressed: live[13]; }
+    }
+
+    PadKey { x: 620 * s; y: 0; width: 150 * s; height: 34 * s; border-radius: 14 * s; text: "RT"; lit: highlight == 14; pressed: live[14]; }
+    PadKey { x: 600 * s; y: 44 * s; width: 190 * s; height: 30 * s; border-radius: 12 * s; text: "RB"; lit: highlight == 15; pressed: live[15]; }
+    PadKey { x: 690 * s; y: 200 * s; width: 60 * s; height: 60 * s; border-radius: 30 * s; text: "Y"; text-color: #ffd54a; lit: highlight == 16; pressed: live[16]; }
+    PadKey { x: 630 * s; y: 260 * s; width: 60 * s; height: 60 * s; border-radius: 30 * s; text: "X"; text-color: #55a8ff; lit: highlight == 17; pressed: live[17]; }
+    PadKey { x: 750 * s; y: 260 * s; width: 60 * s; height: 60 * s; border-radius: 30 * s; text: "B"; text-color: #ff6262; lit: highlight == 18; pressed: live[18]; }
+    PadKey { x: 690 * s; y: 320 * s; width: 60 * s; height: 60 * s; border-radius: 30 * s; text: "A"; text-color: #67d36f; lit: highlight == 19; pressed: live[19]; }
+    Thumbstick {
+        x: 552 * s;
+        y: 382 * s;
+        s: s;
+        label: "R3";
+        click-lit: highlight == 20;
+        click-pressed: live[20];
+        dir-lit: [highlight == 21, highlight == 22, highlight == 23, highlight == 24];
+        dir-pressed: [live[21], live[22], live[23], live[24]];
+    }
 }
 
 component RemapRowView inherits Rectangle {
@@ -114,30 +207,97 @@ component RemapRowView inherits Rectangle {
     in property <bool> selected;
     in property <bool> pressed;
     in property <length> u;
-    border-radius: 14 * u;
-    background: selected ? #2d8cff33 : pressed ? #ffffff1f : #ffffff08;
-    border-width: selected ? 2px : 0;
-    border-color: #2d8cff;
+    border-radius: 12 * u;
+    background: selected ? @linear-gradient(90deg, #2d8cff40 0%, #2d8cff14 100%) : pressed ? #ffffff1f : #ffffff07;
+    border-width: 1px;
+    border-color: selected ? #2d8cffb0 : #ffffff0f;
     animate background { duration: 90ms; }
-    VerticalLayout {
-        padding-left: 20 * u;
-        padding-right: 20 * u;
-        alignment: center;
-        spacing: 2 * u;
-        Text {
-            text: data.label;
-            font-size: 22 * u;
-            font-weight: selected ? 600 : 400;
-            color: white;
-            overflow: elide;
+    // Accent bar on the selected row.
+    Rectangle {
+        x: 0;
+        y: 10 * u;
+        width: 4 * u;
+        height: parent.height - 20 * u;
+        border-radius: 2 * u;
+        background: selected ? #2d8cff : transparent;
+    }
+
+    HorizontalLayout {
+        padding-left: 16 * u;
+        padding-right: 16 * u;
+        spacing: 14 * u;
+        VerticalLayout {
+            alignment: center;
+            Rectangle {
+                width: 40 * u;
+                height: 40 * u;
+                border-radius: 20 * u;
+                background: pressed ? white : selected ? #2d8cff : #ffffff14;
+                Text {
+                    width: parent.width;
+                    height: parent.height;
+                    text: data.badge;
+                    font-size: 15 * u;
+                    font-weight: 700;
+                    color: pressed ? black : white;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                }
+            }
         }
 
-        Text {
-            text: data.value == "" ? "No extra trigger" : "+ " + data.value;
-            font-size: 18 * u;
-            color: data.value == "" ? #ffffff59 : #8cc4ff;
-            overflow: elide;
+        VerticalLayout {
+            alignment: center;
+            spacing: 1 * u;
+            Text {
+                text: data.label;
+                font-size: 21 * u;
+                font-weight: selected ? 600 : 400;
+                color: white;
+                overflow: elide;
+            }
+
+            Text {
+                text: data.value == "" ? "No extra trigger" : "+ " + data.value;
+                font-size: 16 * u;
+                color: data.value == "" ? #ffffff4d : #8cc4ff;
+                overflow: elide;
+            }
         }
+    }
+}
+
+// The B badge with a ring that fills while B is held (hold to leave the Controllers screen).
+component HoldBadge inherits Rectangle {
+    in property <float> progress;
+    in property <length> u;
+    width: 46 * u;
+    height: 46 * u;
+    Rectangle {
+        border-radius: self.width / 2;
+        border-width: 3 * u;
+        border-color: #ffffff33;
+    }
+
+    if progress > 0.001: Path {
+        width: parent.width;
+        height: parent.height;
+        viewbox-width: 100;
+        viewbox-height: 100;
+        stroke: #2d8cff;
+        stroke-width: 3 * u;
+        commands: "M 50 3.5 A 46.5 46.5 0 " + (progress > 0.5 ? "1" : "0") + " 1 " + (50 + 46.5 * Math.sin(progress * 360deg)) + " " + (50 - 46.5 * Math.cos(progress * 360deg));
+    }
+
+    Text {
+        width: parent.width;
+        height: parent.height;
+        text: "B";
+        font-size: 18 * u;
+        font-weight: 700;
+        color: white;
+        horizontal-alignment: center;
+        vertical-alignment: center;
     }
 }
 
@@ -297,6 +457,8 @@ export component AppWindow inherits Window {
     in property <[bool]> live;
     in property <bool> capturing;
     in property <string> capture-text;
+    in property <float> back-progress;
+    in property <bool> gear-focused;
     in property <string> toast;
     in property <bool> toast-visible;
 
@@ -305,6 +467,8 @@ export component AppWindow inherits Window {
     callback home-combo();
     // Controllers-screen data waits in a channel; this tells the app to read it.
     callback controller-event();
+    callback back-released();
+    callback back-hold-tick();
     // Empty message: the game ended normally; otherwise why it failed.
     callback game-ended(string);
 
@@ -365,7 +529,7 @@ export component AppWindow inherits Window {
         for tab[i] in tabs: Rectangle {
             horizontal-stretch: 0;
             border-radius: 12 * u;
-            background: zone == Zone.tabs && i == current-tab ? #ffffff26 : transparent;
+            background: zone == Zone.tabs && i == current-tab && !gear-focused ? #ffffff26 : transparent;
             animate background { duration: 120ms; }
             HorizontalLayout {
                 padding-left: 16 * u;
@@ -396,9 +560,15 @@ export component AppWindow inherits Window {
         height: 56 * u;
         spacing: 40 * u;
         alignment: end;
-        Glyph {
-            text: "\u{E713}";
-            font-size: 28 * u;
+        Rectangle {
+            width: 56 * u;
+            border-radius: 12 * u;
+            background: gear-focused ? #ffffff26 : transparent;
+            animate background { duration: 120ms; }
+            Glyph {
+                text: "\u{E713}";
+                font-size: 28 * u;
+            }
         }
 
         Text {
@@ -553,7 +723,7 @@ export component AppWindow inherits Window {
         spacing: 32 * u;
         ButtonHint {
             key: "A";
-            label: zone == Zone.tabs ? "Open" : "Play";
+            label: zone == Zone.tabs ? (gear-focused ? "Menu" : "Open") : "Play";
             u: u;
         }
 
@@ -768,14 +938,37 @@ export component AppWindow inherits Window {
 
     // --- Controllers screen ---
     if overlay == 4: Rectangle {
-        property <length> column-w: 470 * u;
-        property <length> picture-x: margin + column-w + 50 * u;
+        property <length> column-w: 460 * u;
+        property <length> row-h: 60 * u;
+        property <length> row-pitch: 66 * u;
+        property <length> list-y: 170 * u;
+        property <length> picture-x: margin + column-w + 60 * u;
         property <length> picture-w: root.width - 2 * picture-x;
         property <length> picture-y: 190 * u;
-        background: #0a0f18;
+        property <length> ps: picture-w / 1000;
+        property <length> box-y: picture-y + picture-w * 0.64 + 20 * u;
+        // Where each input sits on the picture (design units), in controllers::ALL order.
+        property <[{x: float, y: float}]> anchors: [
+            { x: 305, y: 17 }, { x: 305, y: 59 }, { x: 440, y: 316 }, { x: 560, y: 316 }, { x: 500, y: 228 },
+            { x: 300, y: 290 }, { x: 300, y: 222 }, { x: 246, y: 290 }, { x: 354, y: 290 }, { x: 300, y: 358 },
+            { x: 390, y: 410 }, { x: 352, y: 448 }, { x: 428, y: 448 }, { x: 390, y: 486 },
+            { x: 695, y: 17 }, { x: 695, y: 59 }, { x: 720, y: 230 }, { x: 660, y: 290 }, { x: 780, y: 290 }, { x: 720, y: 350 },
+            { x: 620, y: 450 }, { x: 620, y: 382 }, { x: 566, y: 450 }, { x: 674, y: 450 }, { x: 620, y: 518 },
+        ];
+        property <RemapRow> selected-row: remap-rows[remap-index];
+        property <length> row-x: selected-row.column == 0 ? margin : selected-row.column == 2 ? root.width - margin - column-w : (root.width - column-w) / 2;
+        property <length> row-y: selected-row.column == 1 ? box-y + selected-row.row * row-pitch : list-y + selected-row.row * row-pitch;
+        // Connector start: the row's edge facing the picture.
+        property <length> line-x: selected-row.column == 0 ? row-x + column-w : selected-row.column == 2 ? row-x : row-x + column-w / 2;
+        property <length> line-y: selected-row.column == 1 ? row-y : row-y + row-h / 2;
+        property <length> end-x: picture-x + anchors[remap-index].x * ps;
+        property <length> end-y: picture-y + anchors[remap-index].y * ps;
+
+        background: @radial-gradient(circle, #1a2744 0%, #0d1320 45%, #080b12 100%);
+
         Text {
             x: margin;
-            y: 44 * u;
+            y: 40 * u;
             text: "Controllers";
             font-size: 40 * u;
             font-weight: 600;
@@ -784,11 +977,35 @@ export component AppWindow inherits Window {
 
         Text {
             x: margin;
-            y: 100 * u;
+            y: 96 * u;
             text: controllers-title;
-            font-size: 24 * u;
+            font-size: 22 * u;
             font-weight: 300;
             color: #ffffffb3;
+        }
+
+        // Elbow line from the selected row to its button on the picture.
+        Path {
+            width: root.width;
+            height: root.height;
+            viewbox-width: root.width / 1px;
+            viewbox-height: root.height / 1px;
+            stroke: #2d8cffc0;
+            stroke-width: 2px;
+            MoveTo {
+                x: line-x / 1px;
+                y: line-y / 1px;
+            }
+
+            LineTo {
+                x: (selected-row.column == 1 ? line-x : (line-x + end-x) / 2) / 1px;
+                y: (selected-row.column == 1 ? (line-y + end-y) / 2 : line-y) / 1px;
+            }
+
+            LineTo {
+                x: end-x / 1px;
+                y: end-y / 1px;
+            }
         }
 
         ControllerPicture {
@@ -800,22 +1017,31 @@ export component AppWindow inherits Window {
             live: live;
         }
 
+        Rectangle {
+            x: end-x - 5px;
+            y: end-y - 5px;
+            width: 10px;
+            height: 10px;
+            border-radius: 5px;
+            background: #9fd0ff;
+        }
+
         for row[i] in remap-rows: RemapRowView {
             data: row;
             selected: i == remap-index;
             pressed: live[i];
             u: u;
             width: column-w;
-            height: 72 * u;
+            height: row-h;
             x: row.column == 0 ? margin : row.column == 2 ? root.width - margin - column-w : (root.width - column-w) / 2;
-            y: row.column == 1 ? picture-y + picture-w * 0.64 + 24 * u + row.row * 80 * u : 190 * u + row.row * 84 * u;
+            y: row.column == 1 ? box-y + row.row * row-pitch : list-y + row.row * row-pitch;
         }
 
         HorizontalLayout {
             x: margin;
-            y: root.height - 60 * u;
+            y: root.height - 66 * u;
             width: root.width - 2 * margin;
-            height: 34 * u;
+            height: 46 * u;
             alignment: end;
             spacing: 32 * u;
             ButtonHint {
@@ -830,10 +1056,19 @@ export component AppWindow inherits Window {
                 u: u;
             }
 
-            ButtonHint {
-                key: "B";
-                label: "Back";
-                u: u;
+            HorizontalLayout {
+                spacing: 10 * u;
+                HoldBadge {
+                    progress: back-progress;
+                    u: u;
+                }
+
+                Text {
+                    text: "Hold to exit";
+                    color: #ffffffa6;
+                    font-size: 20 * u;
+                    vertical-alignment: center;
+                }
             }
         }
 
@@ -901,6 +1136,13 @@ export component AppWindow inherits Window {
     }
 
     keys := FocusScope {
+        key-released(event) => {
+            if (event.text == Key.Escape || event.text == Key.Backspace) {
+                root.back-released();
+                return accept;
+            }
+            return reject;
+        }
         key-pressed(event) => {
             if (event.text == Key.UpArrow) {
                 root.action(Action.up);

@@ -11,7 +11,8 @@ use vigem_client::XButtons;
 
 use crate::Action;
 
-/// Buttons in screen order: left column, then the D-pad box, then the right column.
+/// Inputs in screen order: left column, then the D-pad box, then the right column. Stick
+/// directions count as buttons here so keys can push a stick (WASD for the left stick).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum XButton {
@@ -21,6 +22,10 @@ pub enum XButton {
     Start,
     Guide,
     L3,
+    LsUp,
+    LsLeft,
+    LsRight,
+    LsDown,
     DpadUp,
     DpadLeft,
     DpadRight,
@@ -32,15 +37,23 @@ pub enum XButton {
     B,
     A,
     R3,
+    RsUp,
+    RsLeft,
+    RsRight,
+    RsDown,
 }
 
-pub const ALL: [XButton; 17] = [
+pub const ALL: [XButton; 25] = [
     XButton::Lt,
     XButton::Lb,
     XButton::Back,
     XButton::Start,
     XButton::Guide,
     XButton::L3,
+    XButton::LsUp,
+    XButton::LsLeft,
+    XButton::LsRight,
+    XButton::LsDown,
     XButton::DpadUp,
     XButton::DpadLeft,
     XButton::DpadRight,
@@ -52,10 +65,28 @@ pub const ALL: [XButton; 17] = [
     XButton::B,
     XButton::A,
     XButton::R3,
+    XButton::RsUp,
+    XButton::RsLeft,
+    XButton::RsRight,
+    XButton::RsDown,
 ];
 
 /// Indices into ALL for each list around the picture.
-const COLUMNS: [std::ops::Range<usize>; 3] = [0..6, 6..10, 10..17];
+const COLUMNS: [std::ops::Range<usize>; 3] = [0..10, 10..14, 14..25];
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Stick {
+    Left,
+    Right,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Direction {
+    Up,
+    Left,
+    Right,
+    Down,
+}
 
 impl XButton {
     pub fn label(self) -> &'static str {
@@ -66,6 +97,10 @@ impl XButton {
             XButton::Start => "Start",
             XButton::Guide => "Guide",
             XButton::L3 => "Left stick click (L3)",
+            XButton::LsUp => "Left stick up",
+            XButton::LsLeft => "Left stick left",
+            XButton::LsRight => "Left stick right",
+            XButton::LsDown => "Left stick down",
             XButton::DpadUp => "D-pad up",
             XButton::DpadLeft => "D-pad left",
             XButton::DpadRight => "D-pad right",
@@ -77,13 +112,39 @@ impl XButton {
             XButton::B => "B",
             XButton::A => "A",
             XButton::R3 => "Right stick click (R3)",
+            XButton::RsUp => "Right stick up",
+            XButton::RsLeft => "Right stick left",
+            XButton::RsRight => "Right stick right",
+            XButton::RsDown => "Right stick down",
         }
     }
 
-    /// XInput button flag; triggers are analog and handled separately.
+    /// Short name for the badge at the start of each row.
+    pub fn badge(self) -> &'static str {
+        match self {
+            XButton::Lt => "LT",
+            XButton::Lb => "LB",
+            XButton::Back => "BK",
+            XButton::Start => "ST",
+            XButton::Guide => "G",
+            XButton::L3 => "L3",
+            XButton::LsUp | XButton::RsUp | XButton::DpadUp => "↑",
+            XButton::LsLeft | XButton::RsLeft | XButton::DpadLeft => "←",
+            XButton::LsRight | XButton::RsRight | XButton::DpadRight => "→",
+            XButton::LsDown | XButton::RsDown | XButton::DpadDown => "↓",
+            XButton::Rt => "RT",
+            XButton::Rb => "RB",
+            XButton::Y => "Y",
+            XButton::X => "X",
+            XButton::B => "B",
+            XButton::A => "A",
+            XButton::R3 => "R3",
+        }
+    }
+
+    /// XInput button flag; triggers and stick directions are analog and handled separately.
     pub fn xinput_flag(self) -> Option<u16> {
         Some(match self {
-            XButton::Lt | XButton::Rt => return None,
             XButton::Lb => XButtons::LB,
             XButton::Back => XButtons::BACK,
             XButton::Start => XButtons::START,
@@ -99,13 +160,13 @@ impl XButton {
             XButton::B => XButtons::B,
             XButton::A => XButtons::A,
             XButton::R3 => XButtons::RTHUMB,
+            _ => return None,
         })
     }
 
-    /// How SDL reports this button on the user's pad (triggers are axes).
+    /// How SDL reports this button on the user's pad (triggers and sticks are axes).
     pub fn sdl_button(self) -> Option<SDL_GamepadButton> {
         Some(match self {
-            XButton::Lt | XButton::Rt => return None,
             XButton::Lb => SDL_GAMEPAD_BUTTON_LEFT_SHOULDER,
             XButton::Back => SDL_GAMEPAD_BUTTON_BACK,
             XButton::Start => SDL_GAMEPAD_BUTTON_START,
@@ -121,6 +182,7 @@ impl XButton {
             XButton::B => SDL_GAMEPAD_BUTTON_EAST,
             XButton::A => SDL_GAMEPAD_BUTTON_SOUTH,
             XButton::R3 => SDL_GAMEPAD_BUTTON_RIGHT_STICK,
+            _ => return None,
         })
     }
 
@@ -130,6 +192,31 @@ impl XButton {
             XButton::Rt => Some(SDL_GAMEPAD_AXIS_RIGHT_TRIGGER),
             _ => None,
         }
+    }
+
+    pub fn stick_direction(self) -> Option<(Stick, Direction)> {
+        Some(match self {
+            XButton::LsUp => (Stick::Left, Direction::Up),
+            XButton::LsLeft => (Stick::Left, Direction::Left),
+            XButton::LsRight => (Stick::Left, Direction::Right),
+            XButton::LsDown => (Stick::Left, Direction::Down),
+            XButton::RsUp => (Stick::Right, Direction::Up),
+            XButton::RsLeft => (Stick::Right, Direction::Left),
+            XButton::RsRight => (Stick::Right, Direction::Right),
+            XButton::RsDown => (Stick::Right, Direction::Down),
+            _ => return None,
+        })
+    }
+}
+
+/// Is a stick pushed in `direction`, given SDL's axis values (y points down in SDL)?
+pub fn stick_pushed(x: i16, y: i16, direction: Direction) -> bool {
+    const PUSHED: i16 = 16_000;
+    match direction {
+        Direction::Up => y < -PUSHED,
+        Direction::Down => y > PUSHED,
+        Direction::Left => x < -PUSHED,
+        Direction::Right => x > PUSHED,
     }
 }
 
@@ -230,32 +317,49 @@ mod tests {
 
     #[test]
     fn navigation_moves_in_all_four_directions() {
-        // Left column: Lt(0) .. L3(5); D-pad box: 6..9; right column: Rt(10) .. R3(16).
+        // Left column 0..10 (with left-stick directions), D-pad box 10..14, right column 14..25.
         assert_eq!(navigate(0, Action::Down), 1);
         assert_eq!(navigate(0, Action::Up), 0);
-        assert_eq!(navigate(1, Action::Right), 7, "row 1 of the D-pad box");
-        assert_eq!(navigate(7, Action::Right), 11, "row 1 of the right column");
-        assert_eq!(navigate(11, Action::Left), 7);
-        assert_eq!(navigate(16, Action::Down), 16);
-        // Row 6 of the right column has no counterpart in the 4-row D-pad box: clamp to its last row.
-        assert_eq!(navigate(16, Action::Left), 9);
+        assert_eq!(navigate(1, Action::Right), 11, "row 1 of the D-pad box");
+        assert_eq!(navigate(11, Action::Right), 15, "row 1 of the right column");
+        assert_eq!(navigate(15, Action::Left), 11);
+        assert_eq!(navigate(24, Action::Down), 24);
+        // Rows past the D-pad box's four clamp to its last row.
+        assert_eq!(navigate(24, Action::Left), 13);
+        assert_eq!(navigate(9, Action::Right), 13);
         assert_eq!(navigate(0, Action::Left), 0);
     }
 
     #[test]
-    fn every_button_has_a_place_and_a_mapping() {
+    fn every_input_has_a_place_and_exactly_one_source() {
         for (i, button) in ALL.iter().enumerate() {
             let (column, row) = place(i);
-            assert!(column < 3 && row < 7);
-            assert!(
-                button.xinput_flag().is_some() != button.trigger_axis().is_some(),
-                "{button:?}"
-            );
-            assert!(
-                button.sdl_button().is_some() != button.trigger_axis().is_some(),
+            assert!(column < 3 && row < 11);
+            let kinds = [
+                button.sdl_button().is_some(),
+                button.trigger_axis().is_some(),
+                button.stick_direction().is_some(),
+            ];
+            assert_eq!(kinds.iter().filter(|k| **k).count(), 1, "{button:?}");
+            assert_eq!(
+                button.xinput_flag().is_some(),
+                button.sdl_button().is_some(),
                 "{button:?}"
             );
         }
+    }
+
+    #[test]
+    fn stick_directions_follow_sdl_axes() {
+        assert!(
+            stick_pushed(0, -30_000, Direction::Up),
+            "SDL y is negative when pushed up"
+        );
+        assert!(stick_pushed(30_000, 0, Direction::Right));
+        assert!(
+            !stick_pushed(5_000, 0, Direction::Right),
+            "inside the dead zone"
+        );
     }
 
     #[test]

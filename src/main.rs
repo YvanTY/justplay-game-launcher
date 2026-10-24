@@ -60,6 +60,9 @@ struct App {
     remap_selected: usize,
     capturing: bool,
     controller_events: std::sync::mpsc::Receiver<InputEvent>,
+    /// Hold-B-to-exit on the Controllers screen: when B went down, and the ring's tick timer.
+    back_hold_since: Option<std::time::Instant>,
+    back_hold_timer: Timer,
     /// None when the PC has no usable audio output; the launcher works silently then.
     audio: Option<Rc<Audio>>,
     music: Option<Rc<Music>>,
@@ -121,6 +124,8 @@ fn main() -> Result<(), slint::PlatformError> {
         remap_selected: 0,
         capturing: false,
         controller_events,
+        back_hold_since: None,
+        back_hold_timer: Timer::default(),
         audio,
         music,
         audio_timer: Timer::default(),
@@ -195,6 +200,16 @@ fn main() -> Result<(), slint::PlatformError> {
     });
 
     let weak = ui.as_weak();
+    ui.on_back_hold_tick({
+        let weak = ui.as_weak();
+        let app = app.clone();
+        move || back_hold_tick(&weak.unwrap(), &mut app.borrow_mut())
+    });
+    ui.on_back_released({
+        let weak = ui.as_weak();
+        let app = app.clone();
+        move || cancel_back_hold(&weak.unwrap(), &mut app.borrow_mut())
+    });
     ui.on_controller_event({
         let weak = ui.as_weak();
         let app = app.clone();
@@ -222,6 +237,7 @@ fn main() -> Result<(), slint::PlatformError> {
                 Some(InputEvent::Action(action)) => ui.invoke_action(action),
                 Some(InputEvent::Notice(text)) => ui.invoke_notify(text.into()),
                 Some(InputEvent::HomeCombo) => ui.invoke_home_combo(),
+                Some(InputEvent::BackReleased) => ui.invoke_back_released(),
                 _ => ui.invoke_controller_event(),
             }
         });
@@ -249,6 +265,10 @@ fn apply_effects(ui: &AppWindow, app_rc: &Rc<RefCell<App>>, effects: &[Effect]) 
                 if app.home.running == Some(*game) {
                     input::set_translation(translation_for(&app.home, *game));
                 }
+            }
+            Effect::OpenPanel => {
+                app.menus.overlay = Overlay::Panel;
+                push_menus(ui, &app);
             }
             Effect::CloseGame => {
                 // The watcher notices the processes ending and brings the launcher back.
@@ -344,6 +364,7 @@ fn push_selection(ui: &AppWindow, app: &mut App) {
 /// Cheap per-keypress values: focus positions, zone and the game sheet.
 fn push_scalars(ui: &AppWindow, home: &Home) {
     ui.set_zone(home.zone);
+    ui.set_gear_focused(home.gear && home.zone == Zone::Tabs);
     ui.set_selected(home.tab().focus as i32);
     ui.set_action_index(home.action as i32);
     ui.set_recent_index(home.recent_focus as i32);
@@ -535,7 +556,7 @@ fn sound_for(
     if effects.iter().any(|e| {
         matches!(
             e,
-            Effect::Resume | Effect::CloseGame | Effect::ControllerMode(_)
+            Effect::Resume | Effect::CloseGame | Effect::ControllerMode(_) | Effect::OpenPanel
         )
     }) {
         return Some(Sound::Confirm);
@@ -856,9 +877,17 @@ fn handle_controllers_action(ui: &AppWindow, app: &mut App, action: Action) {
             save_remaps(ui, app);
             Some(Sound::Back)
         }
-        Action::Back => {
-            app.menus.overlay = Overlay::Panel;
-            Some(Sound::Back)
+        // Leaving needs B held for BACK_HOLD, so a stray press doesn't throw away the screen.
+        Action::Back if app.back_hold_since.is_none() => {
+            app.back_hold_since = Some(std::time::Instant::now());
+            let weak = ui.as_weak();
+            app.back_hold_timer
+                .start(TimerMode::Repeated, Duration::from_millis(30), move || {
+                    if let Some(ui) = weak.upgrade() {
+                        ui.invoke_back_hold_tick();
+                    }
+                });
+            None
         }
         _ => None,
     };
@@ -867,6 +896,33 @@ fn handle_controllers_action(ui: &AppWindow, app: &mut App, action: Action) {
     }
     push_menus(ui, app);
     sync_controllers_screen(ui, app);
+}
+
+const BACK_HOLD: Duration = Duration::from_secs(3);
+
+/// Fills the ring around the B badge; leaves the Controllers screen once it is full.
+fn back_hold_tick(ui: &AppWindow, app: &mut App) {
+    let Some(since) = app.back_hold_since else {
+        app.back_hold_timer.stop();
+        return;
+    };
+    let progress = since.elapsed().as_secs_f32() / BACK_HOLD.as_secs_f32();
+    if progress < 1.0 {
+        // A full circle would have identical start and end points, which draws nothing.
+        ui.set_back_progress(progress.min(0.999));
+        return;
+    }
+    cancel_back_hold(ui, app);
+    app.menus.overlay = Overlay::Panel;
+    play_sound(app, Sound::Back);
+    push_menus(ui, app);
+    sync_controllers_screen(ui, app);
+}
+
+fn cancel_back_hold(ui: &AppWindow, app: &mut App) {
+    app.back_hold_since = None;
+    app.back_hold_timer.stop();
+    ui.set_back_progress(0.0);
 }
 
 /// Drains Controllers-screen events from the input thread.
@@ -962,6 +1018,7 @@ fn sync_controllers_screen(ui: &AppWindow, app: &mut App) {
                 .and_then(|p| p.extra.get(button))
                 .filter(|list| !list.is_empty());
             RemapRow {
+                badge: button.badge().into(),
                 label: button.label().into(),
                 value: extra
                     .map(|list| {
@@ -1201,6 +1258,7 @@ mod tests {
             recent_focus: 0,
             sheet_open: false,
             sheet_focus: 0,
+            gear: false,
         }
     }
 
