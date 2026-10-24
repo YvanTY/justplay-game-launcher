@@ -33,6 +33,9 @@ const ALL_SOUNDS: [Sound; 6] = [
 ];
 
 pub struct Audio {
+    /// A regular device rather than SDL's "simplified" one-stream device, whose bindings can't
+    /// change: the music stream binds to it as well.
+    device: SDL_AudioDeviceID,
     stream: *mut SDL_AudioStream,
     mixer: Arc<Mutex<Mixer>>,
     sounds: Vec<Arc<[f32]>>,
@@ -51,26 +54,34 @@ impl Audio {
             channels: CHANNELS as c_int,
             freq: RATE as c_int,
         };
-        // The stream holds one reference to the mixer; Drop gives it back after destroying the stream.
-        let userdata = Arc::into_raw(mixer.clone()) as *mut c_void;
-        let stream = unsafe {
-            SDL_OpenAudioDeviceStream(
-                SDL_AUDIO_DEVICE_DEFAULT_PLAYBACK,
-                &spec,
-                Some(feed),
-                userdata,
-            )
-        };
-        if stream.is_null() {
-            unsafe { drop(Arc::from_raw(userdata as *const Mutex<Mixer>)) };
+        let device = unsafe { SDL_OpenAudioDevice(SDL_AUDIO_DEVICE_DEFAULT_PLAYBACK, &spec) };
+        if device.0 == 0 {
             return Err(format!("no audio output: {}", sdl_error()));
         }
-        // The device opens paused and stays paused until the first sound.
-        Ok(Audio {
+        let stream = unsafe { SDL_CreateAudioStream(&spec, &spec) };
+        if stream.is_null() {
+            unsafe { SDL_CloseAudioDevice(device) };
+            return Err(format!("audio stream failed: {}", sdl_error()));
+        }
+        // The stream holds one reference to the mixer; Drop gives it back after destroying the stream.
+        let userdata = Arc::into_raw(mixer.clone()) as *mut c_void;
+        // Built before checking so that Drop cleans up on failure too.
+        let audio = Audio {
+            device,
             stream,
             mixer,
             sounds: ALL_SOUNDS.iter().map(|&s| synthesize(s).into()).collect(),
-        })
+        };
+        let ready = unsafe {
+            SDL_SetAudioStreamGetCallback(stream, Some(feed), userdata)
+                && SDL_BindAudioStream(device, stream)
+        };
+        if !ready {
+            return Err(format!("audio stream failed: {}", sdl_error()));
+        }
+        // Stays paused until the first sound.
+        unsafe { SDL_PauseAudioDevice(device) };
+        Ok(audio)
     }
 
     pub fn play(&self, sound: Sound) {
@@ -84,14 +95,19 @@ impl Audio {
                 position: 0,
             });
         }
-        unsafe { SDL_ResumeAudioStreamDevice(self.stream) };
+        unsafe { SDL_ResumeAudioDevice(self.device) };
     }
 
-    /// Pauses the device once every sound has finished, so idle costs no CPU.
-    pub fn pause_if_idle(&self) {
-        let idle = self.mixer.lock().is_ok_and(|mixer| mixer.voices.is_empty());
+    /// The device the UI sounds play on; music streams bind to it too.
+    pub fn device(&self) -> SDL_AudioDeviceID {
+        self.device
+    }
+
+    /// Pauses the device once every sound has finished and no music plays, so idle costs no CPU.
+    pub fn pause_if_idle(&self, music_playing: bool) {
+        let idle = !music_playing && self.mixer.lock().is_ok_and(|mixer| mixer.voices.is_empty());
         if idle {
-            unsafe { SDL_PauseAudioStreamDevice(self.stream) };
+            unsafe { SDL_PauseAudioDevice(self.device) };
         }
     }
 }
@@ -100,6 +116,7 @@ impl Drop for Audio {
     fn drop(&mut self) {
         unsafe {
             SDL_DestroyAudioStream(self.stream);
+            SDL_CloseAudioDevice(self.device);
             drop(Arc::from_raw(Arc::as_ptr(&self.mixer)));
         }
     }

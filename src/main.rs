@@ -9,6 +9,7 @@ mod home;
 mod input;
 mod launcher;
 mod library;
+mod music;
 mod nav;
 mod state;
 
@@ -27,6 +28,7 @@ use home::{Effect, Home, NavState, SheetItem};
 use input::InputEvent;
 use launcher::{Ended, Running};
 use library::{Game, Library};
+use music::Music;
 use state::{ControllerMode, State};
 
 slint::include_modules!();
@@ -49,6 +51,7 @@ struct App {
     in_background: bool,
     /// None when the PC has no usable audio output; the launcher works silently then.
     audio: Option<Rc<Audio>>,
+    music: Option<Rc<Music>>,
     audio_timer: Timer,
 }
 
@@ -80,6 +83,16 @@ fn main() -> Result<(), slint::PlatformError> {
     let (state, state_problem) = State::load(&state_path);
     problems.extend(state_problem);
 
+    let audio = match Audio::start() {
+        Ok(audio) => Some(Rc::new(audio)),
+        Err(e) => {
+            problems.push(format!("Sound is off: {e}"));
+            None
+        }
+    };
+    let music = audio
+        .as_ref()
+        .map(|audio| Rc::new(Music::start(audio.device())));
     let app = Rc::new(RefCell::new(App {
         home: Home::new(library.games, state),
         images: ImageCache::default(),
@@ -90,13 +103,8 @@ fn main() -> Result<(), slint::PlatformError> {
         clock_timer: Timer::default(),
         running: None,
         in_background: false,
-        audio: match Audio::start() {
-            Ok(audio) => Some(Rc::new(audio)),
-            Err(e) => {
-                problems.push(format!("Sound is off: {e}"));
-                None
-            }
-        },
+        audio,
+        music,
         audio_timer: Timer::default(),
     }));
 
@@ -106,6 +114,7 @@ fn main() -> Result<(), slint::PlatformError> {
         push_selection(&ui, &mut app);
         push_scalars(&ui, &app.home);
         show_hero(&ui, &mut app);
+        update_music(&app);
         problems.append(&mut app.images.problems);
         for problem in &problems {
             diag::log(problem);
@@ -228,6 +237,7 @@ fn apply_effects(ui: &AppWindow, app_rc: &Rc<RefCell<App>>, effects: &[Effect]) 
             .start(TimerMode::SingleShot, HERO_DELAY, move || {
                 if let Some(ui) = weak.upgrade() {
                     show_hero(&ui, &mut app.borrow_mut());
+                    update_music(&app.borrow());
                 }
             });
     }
@@ -521,6 +531,7 @@ fn sound_for(
 
 fn go_background(ui: &AppWindow, app: &mut App) {
     app.in_background = true;
+    update_music(app);
     input::IN_GAME.store(true, Ordering::Relaxed);
     app.hero_timer.stop();
     if let Err(e) = ui.hide() {
@@ -536,14 +547,39 @@ fn go_background(ui: &AppWindow, app: &mut App) {
 
 /// Plays a UI sound; the audio device pauses again shortly after, so silence costs no CPU.
 fn play_sound(app: &App, sound: Sound) {
-    let Some(audio) = &app.audio else { return };
-    audio.play(sound);
-    let audio = audio.clone();
+    if let Some(audio) = &app.audio {
+        audio.play(sound);
+    }
     // The longest sound (the launch whoosh) lasts 0.8 s.
+    schedule_audio_pause(app, Duration::from_secs(1));
+}
+
+/// Lets the audio device pause after `delay` if no sound or music is playing by then.
+fn schedule_audio_pause(app: &App, delay: Duration) {
+    let Some(audio) = app.audio.clone() else {
+        return;
+    };
+    let music = app.music.clone();
     app.audio_timer
-        .start(TimerMode::SingleShot, Duration::from_secs(1), move || {
-            audio.pause_if_idle()
+        .start(TimerMode::SingleShot, delay, move || {
+            let music_playing = music.as_ref().is_some_and(|m| m.is_playing());
+            audio.pause_if_idle(music_playing);
         });
+}
+
+/// Plays the selected game's music (or fades to silence when it has none).
+fn update_music(app: &App) {
+    let Some(music) = &app.music else { return };
+    let path = if app.in_background {
+        None
+    } else {
+        app.home
+            .selected_game()
+            .and_then(|i| app.home.games[i].art.music.clone())
+    };
+    music.play(path);
+    // Covers the fade-out when switching to a game without music.
+    schedule_audio_pause(app, Duration::from_millis(1500));
 }
 
 fn come_back(ui: &AppWindow, app: &mut App) {
@@ -566,6 +602,7 @@ fn come_back(ui: &AppWindow, app: &mut App) {
     push_selection(ui, app);
     push_scalars(ui, &app.home);
     show_hero(ui, app);
+    update_music(app);
 }
 
 fn window_handle(ui: &AppWindow) -> Option<windows_sys::Win32::Foundation::HWND> {

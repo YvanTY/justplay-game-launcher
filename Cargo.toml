@@ -9,6 +9,7 @@ sdl3-sys = { version = "0.7.2", default-features = false }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
 slint = { version = "1.18.1", default-features = false, features = ["std", "compat-1-2", "backend-winit", "renderer-femtovg", "raw-window-handle-06"] }
+symphonia = { version = "0.6.1", default-features = false, features = ["mp3", "ogg", "vorbis", "flac", "wav", "pcm"] }
 toml = "1.1.8"
 vigem-client = "0.1.4"
 windows-sys = { version = "0.61", features = [

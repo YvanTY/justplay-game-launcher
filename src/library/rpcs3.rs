@@ -116,6 +116,7 @@ fn push_game(
             // PIC0 looks like a logo but is often an empty transparent placeholder (God of War III),
             // so PS3 games show their title text unless the user supplies a logo.
             logo: None,
+            music: None,
         },
         // RPCS3 reads pads itself (Yvan configured his there).
         xinput: false,

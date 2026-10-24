@@ -13,6 +13,8 @@ pub struct Art {
     pub icon: Option<PathBuf>,
     pub hero: Option<PathBuf>,
     pub logo: Option<PathBuf>,
+    /// Background music played while the game is selected.
+    pub music: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -88,6 +90,7 @@ fn pc_game(entry: &PcGame, warnings: &mut Vec<String>) -> Option<Game> {
             icon: entry.icon.clone(),
             hero: entry.hero.clone(),
             logo: entry.logo.clone(),
+            music: None,
         },
         xinput: entry.xinput,
     })
@@ -107,6 +110,9 @@ fn apply_art_folder(game: &mut Game, art_dir: &Path) {
         if let Some(found) = find_image(&dir, stem) {
             *slot = Some(found);
         }
+    }
+    if let Some(music) = crate::music::find_music(&dir) {
+        game.art.music = Some(music);
     }
 }
 

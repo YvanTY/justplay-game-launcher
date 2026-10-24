@@ -52,6 +52,7 @@ pub fn scan(system: &SystemConfig, warnings: &mut Vec<String>) -> Vec<Game> {
             icon: find_image(dir, &stem),
             hero: find_image(dir, &format!("{stem}-hero")),
             logo: find_image(dir, &format!("{stem}-logo")),
+            music: None,
         });
         // The path inside the ROM folder keeps same-named ROMs in different subfolders apart.
         let relative = rom.strip_prefix(&system.roms).unwrap_or(&rom);
