@@ -55,6 +55,8 @@ const HERO_DELAY: Duration = Duration::from_millis(140);
 const HERO_CACHE: usize = 2;
 /// How often plugged/unplugged drives are noticed while the launcher is visible (one cheap call).
 const DRIVE_POLL: Duration = Duration::from_secs(2);
+/// The mouse pointer hides again after this long without moving.
+const POINTER_IDLE: Duration = Duration::from_secs(3);
 
 struct App {
     home: Home,
@@ -112,6 +114,8 @@ struct App {
     /// its way; a later pick for the same slot replaces the token, so a late arrival is ignored.
     art_upgrades: HashMap<(String, usize), (u64, PathBuf)>,
     art_upgrade_token: u64,
+    /// Hides the mouse pointer once it stops moving.
+    pointer_timer: Timer,
 }
 
 fn main() -> Result<(), slint::PlatformError> {
@@ -201,6 +205,7 @@ fn main() -> Result<(), slint::PlatformError> {
         art_cancel: Arc::new(AtomicBool::new(false)),
         art_upgrades: HashMap::new(),
         art_upgrade_token: 0,
+        pointer_timer: Timer::default(),
     }));
 
     {
@@ -237,26 +242,38 @@ fn main() -> Result<(), slint::PlatformError> {
         let app = app.clone();
         move |action| {
             let ui = weak.unwrap();
-            // While a game has the screen, pads are only listened to for the home combo.
-            if app.borrow().in_background {
-                return;
+            // A pad or the keyboard is in use: the mouse pointer gets out of the way.
+            if ui.global::<Mouse>().get_visible() {
+                ui.global::<Mouse>().set_visible(false);
             }
-            if std::time::Instant::now() < app.borrow().input_ready_at {
-                diag::log(&format!("ignored {action:?} during the input grace period"));
-                return;
-            }
-            if action == Action::Menu || app.borrow().menus.is_open() {
-                handle_menu_action(&ui, &mut app.borrow_mut(), action);
-                return;
-            }
-            let before = app.borrow().home.nav_state();
-            let effects = app.borrow_mut().home.handle(action);
-            let after = app.borrow().home.nav_state();
-            if let Some(sound) = sound_for(action, before, after, &effects) {
-                play_sound(&app.borrow(), sound);
-            }
-            apply_effects(&ui, &app, &effects);
+            handle_action(&ui, &app, action);
         }
+    });
+    let mouse = ui.global::<Mouse>();
+    mouse.on_act({
+        let weak = ui.as_weak();
+        let app = app.clone();
+        move |action| handle_action(&weak.unwrap(), &app, action)
+    });
+    mouse.on_clicked({
+        let weak = ui.as_weak();
+        let app = app.clone();
+        move |target, a, b| handle_click(&weak.unwrap(), &app, target, a, b)
+    });
+    mouse.on_back({
+        let weak = ui.as_weak();
+        let app = app.clone();
+        move || mouse_back(&weak.unwrap(), &app)
+    });
+    mouse.on_wheel({
+        let weak = ui.as_weak();
+        let app = app.clone();
+        move |delta| mouse_wheel(&weak.unwrap(), &app, delta)
+    });
+    mouse.on_moved({
+        let weak = ui.as_weak();
+        let app = app.clone();
+        move || show_pointer(&weak.unwrap(), &app.borrow())
     });
     ui.on_notify({
         let weak = ui.as_weak();
@@ -334,6 +351,272 @@ fn main() -> Result<(), slint::PlatformError> {
     ui.window().set_fullscreen(true);
     ui.show()?;
     slint::run_event_loop_until_quit()
+}
+
+/// One controller, keyboard or clicked-hint action.
+fn handle_action(ui: &AppWindow, app: &Rc<RefCell<App>>, action: Action) {
+    // While a game has the screen, pads are only listened to for the home combo.
+    if app.borrow().in_background {
+        return;
+    }
+    if std::time::Instant::now() < app.borrow().input_ready_at {
+        diag::log(&format!("ignored {action:?} during the input grace period"));
+        return;
+    }
+    if action == Action::Menu || app.borrow().menus.is_open() {
+        handle_menu_action(ui, &mut app.borrow_mut(), action);
+        return;
+    }
+    let before = app.borrow().home.nav_state();
+    let effects = app.borrow_mut().home.handle(action);
+    let after = app.borrow().home.nav_state();
+    if let Some(sound) = sound_for(action, before, after, &effects) {
+        play_sound(&app.borrow(), sound);
+    }
+    apply_effects(ui, app, &effects);
+}
+
+/// What a click leads to once the clicked thing is selected.
+enum Then {
+    Nothing,
+    /// Run this action as if pressed (Confirm activates what is now selected).
+    Action(Action),
+    Effects(Vec<Effect>),
+}
+
+/// A left click: the first click on something selects it, a click on what is already selected
+/// activates it, so a stray click never starts a game. Buttons (Play, menu items) act at once.
+fn handle_click(ui: &AppWindow, app_rc: &Rc<RefCell<App>>, target: Target, a: i32, b: i32) {
+    let then = {
+        let mut app = app_rc.borrow_mut();
+        if app.in_background {
+            return;
+        }
+        click(
+            ui,
+            &mut app,
+            target,
+            a.max(0) as usize,
+            b.max(0) as usize,
+            b,
+        )
+    };
+    match then {
+        Then::Nothing => {}
+        Then::Action(action) => handle_action(ui, app_rc, action),
+        Then::Effects(effects) => apply_effects(ui, app_rc, &effects),
+    }
+}
+
+fn click(ui: &AppWindow, app: &mut App, target: Target, a: usize, b: usize, step: i32) -> Then {
+    let moved = |app: &App| play_sound(app, Sound::Move);
+    match target {
+        Target::None => Then::Nothing,
+        // --- Home screen (only reachable while no menu covers it) ---
+        Target::Tab => {
+            let effects = app.home.select_tab(a);
+            if !effects.is_empty() {
+                play_sound(app, Sound::Tab);
+            }
+            Then::Effects(effects)
+        }
+        Target::Gear => {
+            app.home.zone = Zone::Tabs;
+            app.home.gear = true;
+            Then::Action(Action::Confirm)
+        }
+        Target::Tile => {
+            let home = &mut app.home;
+            if a >= home.tab().games.len() {
+                return Then::Nothing;
+            }
+            if home.zone == Zone::Icons && home.tab().focus == a && home.sheet.is_none() {
+                return Then::Action(Action::Confirm);
+            }
+            home.sheet = None;
+            home.gear = false;
+            home.zone = Zone::Icons;
+            let current = home.current;
+            home.tabs[current].focus = a;
+            moved(app);
+            Then::Effects(vec![Effect::Selection])
+        }
+        Target::Play | Target::More if app.home.tab().games.is_empty() => Then::Nothing,
+        Target::Play | Target::More => {
+            app.home.sheet = None;
+            app.home.zone = Zone::Actions;
+            app.home.action = usize::from(target == Target::More);
+            Then::Action(Action::Confirm)
+        }
+        Target::Recent => {
+            let home = &mut app.home;
+            if a >= home.recent.len() {
+                return Then::Nothing;
+            }
+            if home.zone == Zone::Recent && home.recent_focus == a && home.sheet.is_none() {
+                return Then::Action(Action::Confirm);
+            }
+            home.sheet = None;
+            home.zone = Zone::Recent;
+            home.recent_focus = a;
+            moved(app);
+            Then::Effects(Vec::new())
+        }
+        Target::SheetItem => {
+            let count = app.home.sheet_items().len();
+            match app.home.sheet.as_mut() {
+                Some(sheet) if a < count => {
+                    sheet.focus = a;
+                    Then::Action(Action::Confirm)
+                }
+                _ => Then::Nothing,
+            }
+        }
+        Target::SheetOutside => {
+            app.home.sheet = None;
+            play_sound(app, Sound::Back);
+            Then::Effects(Vec::new())
+        }
+        // --- Quick panel, Power, Settings ---
+        Target::Dismiss => Then::Action(Action::Back),
+        Target::PanelTile => {
+            app.menus.panel_focus = a.min(menus::PANEL.len() - 1);
+            Then::Action(Action::Confirm)
+        }
+        Target::PowerItem => {
+            app.menus.power_focus = a.min(menus::POWER.len() - 1);
+            Then::Action(Action::Confirm)
+        }
+        Target::SettingsRow => {
+            app.menus.settings_focus = a.min(menus::SETTINGS.len() - 1);
+            moved(app);
+            push_menus(ui, app);
+            Then::Nothing
+        }
+        Target::SettingsStep => {
+            app.menus.settings_focus = a.min(menus::SETTINGS.len() - 1);
+            Then::Action(if step < 0 {
+                Action::Left
+            } else {
+                Action::Right
+            })
+        }
+        // --- Controllers screen ---
+        Target::RemapRow if a == app.remap_selected => Then::Action(Action::Confirm),
+        Target::RemapRow => {
+            if a < controllers::ALL.len() && !app.capturing {
+                app.remap_selected = a;
+                moved(app);
+                sync_controllers_screen(ui, app);
+            }
+            Then::Nothing
+        }
+        Target::HoldExit => {
+            leave_controllers_screen(ui, app);
+            Then::Nothing
+        }
+        // --- Add games ---
+        Target::AddRow => {
+            let screen = &mut app.add_games;
+            let (focus, count) = match screen.mode {
+                add_games::Mode::Results => (&mut screen.focus, screen.rows.len()),
+                _ => (&mut screen.place_focus, screen.places.len()),
+            };
+            if a >= count {
+                return Then::Nothing;
+            }
+            if *focus == a {
+                return Then::Action(Action::Confirm);
+            }
+            *focus = a;
+            moved(app);
+            sync_add_games_screen(ui, app);
+            Then::Nothing
+        }
+        // --- Choose art ---
+        Target::ArtThumb => {
+            let Some(picker) = app.art_picker.as_mut() else {
+                return Then::Nothing;
+            };
+            if a > 2 || b >= picker.choices[a].len() {
+                return Then::Nothing;
+            }
+            if picker.slot == a && picker.focus[a] == b {
+                return Then::Action(Action::Confirm);
+            }
+            picker.slot = a;
+            picker.focus[a] = b;
+            moved(app);
+            sync_art_screen(ui, app);
+            Then::Nothing
+        }
+    }
+}
+
+/// Right click: back. The Controllers screen normally wants B held (a pad button is easy to
+/// brush); a click is deliberate, so it leaves at once.
+fn mouse_back(ui: &AppWindow, app_rc: &Rc<RefCell<App>>) {
+    if app_rc.borrow().menus.overlay == Overlay::Controllers {
+        leave_controllers_screen(ui, &mut app_rc.borrow_mut());
+        return;
+    }
+    handle_action(ui, app_rc, Action::Back);
+}
+
+/// The wheel moves through whatever is on screen: lists up and down, rows left and right.
+fn mouse_wheel(ui: &AppWindow, app_rc: &Rc<RefCell<App>>, delta: i32) {
+    let vertical = {
+        let mut app = app_rc.borrow_mut();
+        let App { home, menus, .. } = &mut *app;
+        // On the home screen the wheel scrolls games: from the tab bar or the buttons it moves
+        // to the game row first (the recently played row scrolls itself).
+        if menus.overlay == Overlay::None
+            && home.sheet.is_none()
+            && matches!(home.zone, Zone::Tabs | Zone::Actions)
+            && !home.tab().games.is_empty()
+        {
+            home.gear = false;
+            home.zone = Zone::Icons;
+        }
+        match menus.overlay {
+            Overlay::None => home.sheet.is_some(),
+            Overlay::Art => false,
+            _ => true,
+        }
+    };
+    let action = match (vertical, delta > 0) {
+        (true, true) => Action::Down,
+        (true, false) => Action::Up,
+        (false, true) => Action::Right,
+        (false, false) => Action::Left,
+    };
+    handle_action(ui, app_rc, action);
+}
+
+/// The mouse moved: show the pointer until it rests for POINTER_IDLE.
+fn show_pointer(ui: &AppWindow, app: &App) {
+    let mouse = ui.global::<Mouse>();
+    if !mouse.get_visible() {
+        mouse.set_visible(true);
+    }
+    let weak = ui.as_weak();
+    app.pointer_timer
+        .start(TimerMode::SingleShot, POINTER_IDLE, move || {
+            if let Some(ui) = weak.upgrade() {
+                ui.global::<Mouse>().set_visible(false);
+            }
+        });
+}
+
+fn leave_controllers_screen(ui: &AppWindow, app: &mut App) {
+    if app.menus.overlay != Overlay::Controllers {
+        return;
+    }
+    cancel_back_hold(ui, app);
+    app.menus.overlay = Overlay::Panel;
+    play_sound(app, Sound::Back);
+    push_menus(ui, app);
+    sync_controllers_screen(ui, app);
 }
 
 fn apply_effects(ui: &AppWindow, app_rc: &Rc<RefCell<App>>, effects: &[Effect]) {
@@ -1792,11 +2075,7 @@ fn back_hold_tick(ui: &AppWindow, app: &mut App) {
         ui.set_back_progress(progress.min(0.999));
         return;
     }
-    cancel_back_hold(ui, app);
-    app.menus.overlay = Overlay::Panel;
-    play_sound(app, Sound::Back);
-    push_menus(ui, app);
-    sync_controllers_screen(ui, app);
+    leave_controllers_screen(ui, app);
 }
 
 fn cancel_back_hold(ui: &AppWindow, app: &mut App) {

@@ -4,6 +4,49 @@ export enum Action { up, down, left, right, confirm, back, options, tab-prev, ta
 
 export enum Zone { tabs, icons, actions, recent }
 
+// What a mouse click landed on; main.rs turns it into the same steps a controller would take.
+export enum Target { none, tab, gear, tile, play, more, recent, sheet-item, sheet-outside, dismiss, panel-tile, power-item, settings-row, settings-step, remap-row, hold-exit, add-row, art-thumb }
+
+// Mouse input for the whole window. The pointer only shows while the mouse is being used.
+export global Mouse {
+    in-out property <bool> visible;
+    // Left click on a target; `a` and `b` say which one (index, or row and index).
+    callback clicked(Target, int, int);
+    // Right click anywhere: back.
+    callback back();
+    // Wheel: +1 down / right, -1 up / left.
+    callback wheel(int);
+    // A clicked button hint: the action its button stands for.
+    callback act(Action);
+    callback moved();
+}
+
+// A clickable area. Right click and the wheel work over it too.
+component Hit inherits TouchArea {
+    in property <Target> target;
+    in property <int> a;
+    in property <int> b;
+    mouse-cursor: !Mouse.visible ? MouseCursor.none : target == Target.none ? MouseCursor.default : MouseCursor.pointer;
+    clicked => {
+        Mouse.clicked(target, a, b);
+    }
+    pointer-event(event) => {
+        if (event.button == PointerEventButton.right && event.kind == PointerEventKind.up) {
+            Mouse.back();
+        }
+    }
+    scroll-event(event) => {
+        Mouse.wheel(event.delta-y > 0 ? -1 : 1);
+        accept
+    }
+    changed mouse-x => {
+        Mouse.moved();
+    }
+    changed mouse-y => {
+        Mouse.moved();
+    }
+}
+
 export struct Tile {
     title: string,
     color: color,
@@ -420,20 +463,37 @@ component Badge inherits Rectangle {
     }
 }
 
-component ButtonHint inherits HorizontalLayout {
+// A button hint ("A Play"); clicking it does what the button does.
+component ButtonHint inherits Rectangle {
     in property <string> key;
     in property <string> label;
     in property <length> u;
-    spacing: 10 * u;
-    VerticalLayout {
-        alignment: center;
-        Badge { label: key; u: u; }
+    property <Action> act: key == "A" ? Action.confirm : key == "B" ? Action.back : key == "Y" ? Action.options : key == "LB" ? Action.tab-prev : key == "RB" ? Action.tab-next : key == "LT/RT" ? Action.page-next : key == "≡" ? Action.menu : key == "← →" ? Action.right : key == "↑ ↓" ? Action.down : Action.confirm;
+    border-radius: 10 * u;
+    background: hint-hit.has-hover && Mouse.visible ? #ffffff1a : transparent;
+    HorizontalLayout {
+        padding-left: 6 * u;
+        padding-right: 6 * u;
+        spacing: 10 * u;
+        VerticalLayout {
+            alignment: center;
+            Badge { label: key; u: u; }
+        }
+        Text {
+            text: label;
+            color: #ffffffa6;
+            font-size: 20 * u;
+            vertical-alignment: center;
+        }
     }
-    Text {
-        text: label;
-        color: #ffffffa6;
-        font-size: 20 * u;
-        vertical-alignment: center;
+    hint-hit := TouchArea {
+        mouse-cursor: Mouse.visible ? MouseCursor.pointer : MouseCursor.none;
+        clicked => {
+            Mouse.act(act);
+        }
+        changed mouse-x => {
+            Mouse.moved();
+        }
     }
 }
 
@@ -604,6 +664,9 @@ export component AppWindow inherits Window {
     property <length> card-w: 300 * u;
     property <length> card-gap: 20 * u;
 
+    // Underneath everything: right click (back), the wheel and showing the pointer work anywhere.
+    Hit { }
+
     // --- Background: game art, or a soft gradient of the game's color without art ---
     Rectangle {
         background: @linear-gradient(135deg, backdrop.darker(0.2) 0%, backdrop.darker(0.75) 100%);
@@ -652,6 +715,10 @@ export component AppWindow inherits Window {
             horizontal-stretch: 0;
             border-radius: 12 * u;
             background: zone == Zone.tabs && i == current-tab && !gear-focused ? #ffffff26 : transparent;
+            Hit {
+                target: Target.tab;
+                a: i;
+            }
             animate background { duration: 120ms; }
             HorizontalLayout {
                 padding-left: 16 * u;
@@ -686,6 +753,9 @@ export component AppWindow inherits Window {
             width: 56 * u;
             border-radius: 12 * u;
             background: gear-focused ? #ffffff26 : transparent;
+            Hit {
+                target: Target.gear;
+            }
             animate background { duration: 120ms; }
             Glyph {
                 text: "\u{E713}";
@@ -707,6 +777,10 @@ export component AppWindow inherits Window {
         property <bool> is-selected: i == selected;
         tile: tile;
         ring: is-selected && zone == Zone.icons;
+        Hit {
+            target: Target.tile;
+            a: i;
+        }
         u: u;
         title-size: (is-selected ? 20 : 14) * u;
         x: margin + (i - selected) * (small + gap) + (i > selected ? big - small : 0);
@@ -769,6 +843,9 @@ export component AppWindow inherits Window {
         alignment: start;
         PillButton {
             focused: zone == Zone.actions && action-index == 0;
+            Hit {
+                target: Target.play;
+            }
             u: u;
             width: 230 * u;
             // Still focusable: pressing it says which drive to connect.
@@ -794,6 +871,9 @@ export component AppWindow inherits Window {
 
         PillButton {
             focused: zone == Zone.actions && action-index == 1;
+            Hit {
+                target: Target.more;
+            }
             u: u;
             width: self.height;
             Glyph {
@@ -829,6 +909,10 @@ export component AppWindow inherits Window {
         property <int> scroll: Math.max(0, recent-index - 3);
         tile: card;
         ring: zone == Zone.recent && i == recent-index;
+        Hit {
+            target: Target.recent;
+            a: i;
+        }
         u: u;
         x: margin + (i - scroll) * (card-w + card-gap);
         y: 812 * u;
@@ -873,6 +957,10 @@ export component AppWindow inherits Window {
     // --- Game sheet (⋯ / Y) ---
     if sheet-open: Rectangle {
         background: #00000080;
+        Hit {
+            target: Target.sheet-outside;
+        }
+
         // Opens beside the ⋯ button and drops downward, so the game title stays visible.
         Rectangle {
             x: margin + 338 * u;
@@ -885,6 +973,7 @@ export component AppWindow inherits Window {
             border-color: #ffffff1f;
             drop-shadow-blur: 40 * u;
             drop-shadow-color: #00000099;
+            Hit { }
             for item[i] in sheet-items: Rectangle {
                 x: 12 * u;
                 y: 12 * u + i * 68 * u;
@@ -892,6 +981,10 @@ export component AppWindow inherits Window {
                 height: 64 * u;
                 border-radius: 12 * u;
                 background: i == sheet-index ? white : transparent;
+                Hit {
+                    target: Target.sheet-item;
+                    a: i;
+                }
                 Text {
                     x: 22 * u;
                     height: parent.height;
@@ -907,10 +1000,15 @@ export component AppWindow inherits Window {
     // --- Quick panel (Menu button), Power and Settings ---
     if overlay != 0: Rectangle {
         background: #000000a0;
+        Hit {
+            target: Target.dismiss;
+        }
     }
 
     if overlay == 1 || overlay == 2: Rectangle {
         x: root.width - self.width;
+        Hit { }
+
         width: 620 * u;
         background: #0b1019f5;
         border-width: 1px;
@@ -950,6 +1048,10 @@ export component AppWindow inherits Window {
                 glyph: item.glyph;
                 label: item.label;
                 focused: i == panel-index;
+                Hit {
+                    target: Target.panel-tile;
+                    a: i;
+                }
                 u: u;
             }
         }
@@ -972,6 +1074,10 @@ export component AppWindow inherits Window {
                 height: 72 * u;
                 border-radius: 14 * u;
                 background: i == power-index ? white : transparent;
+                Hit {
+                    target: Target.power-item;
+                    a: i;
+                }
                 Text {
                     x: 24 * u;
                     height: parent.height;
@@ -986,6 +1092,8 @@ export component AppWindow inherits Window {
 
     if overlay == 3: Rectangle {
         property <[string]> labels: ["UI sounds volume", "Music volume"];
+        Hit { }
+
         x: (root.width - self.width) / 2;
         y: (root.height - self.height) / 2;
         width: 900 * u;
@@ -1010,6 +1118,10 @@ export component AppWindow inherits Window {
             height: 80 * u;
             border-radius: 16 * u;
             background: i == settings-index ? #ffffff1f : transparent;
+            Hit {
+                target: Target.settings-row;
+                a: i;
+            }
             border-width: i == settings-index ? 2px : 0;
             border-color: #2d8cff;
             Text {
@@ -1050,6 +1162,23 @@ export component AppWindow inherits Window {
                     color: i == settings-index ? white : #ffffff66;
                 }
             }
+
+            // The arrows step the value, like Left / Right.
+            Hit {
+                x: parent.width - 238 * u;
+                width: 70 * u;
+                target: Target.settings-step;
+                a: i;
+                b: -1;
+            }
+
+            Hit {
+                x: parent.width - 98 * u;
+                width: 70 * u;
+                target: Target.settings-step;
+                a: i;
+                b: 1;
+            }
         }
 
         Text {
@@ -1085,6 +1214,7 @@ export component AppWindow inherits Window {
         property <length> end-y: picture-y + anchors[remap-index].y * ps;
 
         background: @radial-gradient(circle, #1a2744 0%, #0d1320 45%, #080b12 100%);
+        Hit { }
 
         Text {
             x: margin;
@@ -1147,6 +1277,11 @@ export component AppWindow inherits Window {
         }
 
         for row[i] in remap-rows: RemapRowView {
+            Hit {
+                target: Target.remap-row;
+                a: i;
+            }
+
             data: row;
             selected: i == remap-index;
             pressed: live[i];
@@ -1181,6 +1316,9 @@ export component AppWindow inherits Window {
                 HoldBadge {
                     progress: back-progress;
                     u: u;
+                    Hit {
+                        target: Target.hold-exit;
+                    }
                 }
 
                 Text {
@@ -1237,6 +1375,7 @@ export component AppWindow inherits Window {
         // Keeps the selected row in view, a little above the bottom edge.
         property <int> scroll: Math.max(0, Math.min(add-index - 5, add-rows.length - visible-rows));
         background: @radial-gradient(circle, #1a2744 0%, #0d1320 45%, #080b12 100%);
+        Hit { }
 
         Text {
             x: margin;
@@ -1290,6 +1429,11 @@ export component AppWindow inherits Window {
         }
 
         for row[i] in add-rows: AddRowView {
+            Hit {
+                target: Target.add-row;
+                a: i;
+            }
+
             data: row;
             selected: i == add-index;
             u: u;
@@ -1431,6 +1575,7 @@ export component AppWindow inherits Window {
         ];
         property <length> gap: 22 * u;
         background: @radial-gradient(circle, #1a2744 0%, #0d1320 45%, #080b12 100%);
+        Hit { }
 
         Text {
             x: margin;
@@ -1497,6 +1642,12 @@ export component AppWindow inherits Window {
             }
 
             for thumb[i] in row.thumbs: ArtThumbView {
+                Hit {
+                    target: Target.art-thumb;
+                    a: r;
+                    b: i;
+                }
+
                 data: thumb;
                 selected: i == row.focus;
                 row-active: active;
@@ -1633,10 +1784,6 @@ export component AppWindow inherits Window {
         }
     }
 
-    // Controller-first: the mouse pointer is hidden over the launcher.
-    TouchArea {
-        mouse-cursor: none;
-    }
 
     init => {
         keys.focus();

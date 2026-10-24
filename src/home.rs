@@ -415,6 +415,21 @@ impl Home {
         Vec::new()
     }
 
+    /// A tab was clicked: it becomes the current one, with the cursor in the tab bar.
+    pub fn select_tab(&mut self, index: usize) -> Vec<Effect> {
+        if index >= self.tabs.len() {
+            return Vec::new();
+        }
+        self.gear = false;
+        self.sheet = None;
+        self.zone = Zone::Tabs;
+        if index == self.current {
+            return Vec::new();
+        }
+        self.current = index;
+        vec![Effect::Tabs, Effect::Selection]
+    }
+
     fn switch_tab(&mut self, delta: isize) -> Vec<Effect> {
         self.gear = false;
         if self.tabs.len() < 2 {
@@ -774,6 +789,16 @@ mod tests {
         assert_eq!(home.tab().name, "PS3");
         let selected = home.selected_game().unwrap();
         assert_eq!(home.games[selected].title, "God of War III");
+    }
+
+    #[test]
+    fn clicking_a_tab_selects_it() {
+        let mut home = Home::new(sample(), State::default());
+        assert_eq!(home.select_tab(2), [Effect::Tabs, Effect::Selection]);
+        assert_eq!(home.tab().name, "PS3");
+        assert_eq!(home.zone, Zone::Tabs);
+        assert!(home.select_tab(2).is_empty(), "already there");
+        assert!(home.select_tab(9).is_empty(), "no such tab");
     }
 
     #[test]
