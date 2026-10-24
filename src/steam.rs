@@ -111,7 +111,6 @@ fn normalize(title: &str) -> String {
             "vii" => "7",
             "viii" => "8",
             "ix" => "9",
-            "x" => "10",
             other => other,
         })
         .collect::<Vec<_>>()

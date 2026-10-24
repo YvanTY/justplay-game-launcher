@@ -110,7 +110,8 @@ pub struct Library {
 pub fn load(config: &Config, added: &[PcGame], data_dir: &Path) -> Library {
     let cache_path = data_dir.join("games-cache.json");
     let mut cache = Cache::load(&cache_path);
-    for letter in drives::connected() {
+    // Network and optical drives are left out: asking an offline share can stall for seconds.
+    for letter in drives::scannable() {
         if let Some(label) = drives::label(letter) {
             cache.drive_labels.insert(letter.to_string(), label);
         }
@@ -216,12 +217,17 @@ pub(crate) fn find_image(dir: &Path, stem: &str) -> Option<PathBuf> {
 }
 
 pub fn safe_file_name(title: &str) -> String {
-    title
+    let name: String = title
         .chars()
         .filter(|c| !r#"\/:*?"<>|"#.contains(*c))
-        .collect::<String>()
-        .trim()
-        .to_string()
+        .collect();
+    // Windows drops trailing dots and spaces, and "." or ".." would name a parent folder.
+    let name = name.trim_matches(|c: char| c == '.' || c.is_whitespace());
+    if name.is_empty() {
+        "Untitled".to_string()
+    } else {
+        name.to_string()
+    }
 }
 
 /// Splits an argument template on spaces, honouring double quotes, then fills in `{rom}`.
@@ -301,6 +307,8 @@ mod tests {
             "God of War Ascension"
         );
         assert_eq!(safe_file_name("What? <Yes>"), "What Yes");
+        assert_eq!(safe_file_name(".."), "Untitled");
+        assert_eq!(safe_file_name("Stray."), "Stray");
     }
 
     fn temp_data_dir(name: &str) -> PathBuf {

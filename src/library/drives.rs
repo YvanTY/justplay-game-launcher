@@ -28,10 +28,6 @@ pub fn is_connected(letter: char) -> bool {
     Path::new(&format!("{letter}:\\")).is_dir()
 }
 
-pub fn connected() -> Vec<char> {
-    letters(mask()).filter(|&l| is_connected(l)).collect()
-}
-
 /// Internal disks, USB disks and sticks: the drives worth scanning for games. Network shares and
 /// optical drives are left out (slow, and games aren't installed there).
 pub fn scannable() -> Vec<char> {
@@ -90,7 +86,6 @@ mod tests {
         let system = std::env::var("SystemDrive").unwrap_or_else(|_| "C:".into());
         let letter = system.chars().next().unwrap();
         assert!(is_connected(letter));
-        assert!(connected().contains(&letter));
         assert!(scannable().contains(&letter));
     }
 }

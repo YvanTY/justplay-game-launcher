@@ -94,6 +94,9 @@ struct App {
     art_fetcher: std::sync::mpsc::Sender<ArtJob>,
     /// Game ids whose Steam lookup is queued or running.
     art_pending: HashSet<String>,
+    /// Lookups that failed (offline) this session; tried again at the next start, not on
+    /// every reload.
+    art_failed: HashSet<String>,
     notifier: background::Notifier,
     /// The Add games screen, and the switch that stops its drive scan.
     add_games: add_games::AddGames,
@@ -170,6 +173,7 @@ fn main() -> Result<(), slint::PlatformError> {
         hero_loader: background::spawn_hero_loader(notifier.clone()),
         art_fetcher: background::spawn_art_fetcher(notifier.clone()),
         art_pending: HashSet::new(),
+        art_failed: HashSet::new(),
         notifier,
         add_games: add_games::AddGames::default(),
         scan_cancel: Arc::new(AtomicBool::new(false)),
@@ -337,11 +341,17 @@ fn apply_effects(ui: &AppWindow, app_rc: &Rc<RefCell<App>>, effects: &[Effect]) 
                 match missing {
                     None => {
                         app.home.games[*game].missing = None;
+                        push_tabs(ui, &mut app);
+                        push_selection(ui, &mut app);
                         start_game(ui, &mut app, *game);
                     }
                     Some(missing) => {
                         let message = missing.play_message(&app.home.games[*game].title);
-                        app.home.games[*game].missing = Some(missing);
+                        if app.home.games[*game].missing.as_ref() != Some(&missing) {
+                            app.home.games[*game].missing = Some(missing);
+                            push_tabs(ui, &mut app);
+                            push_selection(ui, &mut app);
+                        }
                         app.toasts.show(ui, message);
                     }
                 }
@@ -547,8 +557,12 @@ fn drain_background(ui: &AppWindow, app: &mut App) {
 }
 
 fn hero_loaded(ui: &AppWindow, app: &mut App, path: PathBuf, pixels: Option<scaled_art::Pixels>) {
-    // A game took the screen meanwhile: its memory matters more than this picture.
+    // A game took the screen meanwhile: its memory matters more than this picture. Forgetting
+    // it as shown makes come_back ask for it again.
     if app.in_background {
+        if app.shown_hero.as_ref() == Some(&path) {
+            app.shown_hero = None;
+        }
         return;
     }
     // The decoder can't read every format (e.g. WebP); Slint can, at full size.
@@ -577,12 +591,14 @@ fn queue_art_lookups(app: &mut App) {
         home,
         art_fetcher,
         art_pending,
+        art_failed,
         ..
     } = app;
     for game in &home.games {
         if game.platform != "PC"
             || home.state.art_lookups.contains_key(&game.id)
             || art_pending.contains(&game.id)
+            || art_failed.contains(&game.id)
         {
             continue;
         }
@@ -627,8 +643,9 @@ fn art_fetched(ui: &AppWindow, app: &mut App, id: String, outcome: ArtOutcome) {
             None
         }
         ArtOutcome::Failed(e) => {
-            // Not remembered, so the next start tries again.
+            // Not saved, so the next start tries again.
             diag::log(&format!("art for {id}: {e}"));
+            app.art_failed.insert(id);
             return;
         }
     };
@@ -643,6 +660,11 @@ fn refresh_art(ui: &AppWindow, app: &mut App, id: &str) {
     let art_dir = config::data_dir().join("art");
     if let Some(game) = app.home.games.iter_mut().find(|g| g.id == id) {
         library::apply_art_folder(game, &art_dir);
+    }
+    // During a game nothing is drawn: decoding now would only hold memory the game needs.
+    // come_back pushes the tiles and background again.
+    if app.in_background {
+        return;
     }
     push_tabs(ui, app);
     push_selection(ui, app);
@@ -893,6 +915,8 @@ fn come_back(ui: &AppWindow, app: &mut App) {
         }
         None => diag::log("launcher shown, but no window handle to bring to the front"),
     }
+    // Art may have arrived while the game ran.
+    push_tabs(ui, app);
     push_selection(ui, app);
     push_scalars(ui, &app.home);
     show_hero(ui, app);
@@ -1593,12 +1617,14 @@ fn remove_game(ui: &AppWindow, app: &mut App, game: usize) {
 fn reload_library(ui: &AppWindow, app: &mut App) -> Result<Vec<String>, String> {
     let data_dir = config::data_dir();
     let config = config::load(&data_dir)?;
+    // Read before loading: a drive plugged in during the load then still counts as a change.
+    let mask = library::drives::mask();
     let library = library::load(&config, &app.home.state.added_games, &data_dir);
     for warning in &library.warnings {
         diag::log(warning);
     }
     app.drive_labels = library.drive_labels;
-    app.drive_mask = library::drives::mask();
+    app.drive_mask = mask;
     app.home.replace_games(library.games);
     push_tabs(ui, app);
     push_selection(ui, app);
