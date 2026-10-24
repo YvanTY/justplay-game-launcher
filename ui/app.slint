@@ -36,7 +36,7 @@ component Hit inherits TouchArea {
         }
     }
     scroll-event(event) => {
-        Mouse.wheel(event.delta-y > 0 ? -1 : 1);
+        Mouse.wheel(event.delta-y > 0 ? -1 : event.delta-y < 0 ? 1 : 0);
         accept
     }
     changed mouse-x => {

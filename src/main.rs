@@ -114,6 +114,12 @@ struct App {
     /// its way; a later pick for the same slot replaces the token, so a late arrival is ignored.
     art_upgrades: HashMap<(String, usize), (u64, PathBuf)>,
     art_upgrade_token: u64,
+    /// Counts openings of the Choose art screen (each gets its own session key).
+    art_sessions: u64,
+    /// The last thing clicked: a second click on the same thing activates it.
+    last_click: Option<(Target, usize, usize)>,
+    /// The click being handled hit the same thing as the one before.
+    repeated_click: bool,
     /// Hides the mouse pointer once it stops moving.
     pointer_timer: Timer,
 }
@@ -129,13 +135,16 @@ fn main() -> Result<(), slint::PlatformError> {
     let mut problems = Vec::new();
     let state_path = data_dir.join("state.json");
     let (mut state, state_problem) = State::load(&state_path);
-    problems.extend(state_problem);
     // 2: Steam editions and subtitles, then PCGamingWiki for games Steam no longer sells.
+    // Saved at once only if state.json was read fine: a file that was locked or unreadable
+    // must not be replaced by an empty state before the user has done anything.
     if state.retry_art_misses(2)
+        && state_problem.is_none()
         && let Err(e) = state.save(&state_path)
     {
         problems.push(e);
     }
+    problems.extend(state_problem);
     let drive_mask = library::drives::mask();
     let library = match config::load(&data_dir) {
         Ok(config) => library::load(&config, &state.added_games, &data_dir),
@@ -205,6 +214,9 @@ fn main() -> Result<(), slint::PlatformError> {
         art_cancel: Arc::new(AtomicBool::new(false)),
         art_upgrades: HashMap::new(),
         art_upgrade_token: 0,
+        art_sessions: 0,
+        last_click: None,
+        repeated_click: false,
         pointer_timer: Timer::default(),
     }));
 
@@ -353,16 +365,20 @@ fn main() -> Result<(), slint::PlatformError> {
     slint::run_event_loop_until_quit()
 }
 
+/// While a game has the screen, or in the second after the launcher appears, input is ignored
+/// (pads are only listened to for the home combo; a stale press must not start a game).
+fn input_paused(app: &App) -> bool {
+    app.in_background || std::time::Instant::now() < app.input_ready_at
+}
+
 /// One controller, keyboard or clicked-hint action.
 fn handle_action(ui: &AppWindow, app: &Rc<RefCell<App>>, action: Action) {
-    // While a game has the screen, pads are only listened to for the home combo.
-    if app.borrow().in_background {
+    if input_paused(&app.borrow()) {
+        diag::log(&format!("ignored {action:?} while input is paused"));
         return;
     }
-    if std::time::Instant::now() < app.borrow().input_ready_at {
-        diag::log(&format!("ignored {action:?} during the input grace period"));
-        return;
-    }
+    // A pad or keyboard press in between means the next click starts over.
+    app.borrow_mut().last_click = None;
     if action == Action::Menu || app.borrow().menus.is_open() {
         handle_menu_action(ui, &mut app.borrow_mut(), action);
         return;
@@ -389,9 +405,13 @@ enum Then {
 fn handle_click(ui: &AppWindow, app_rc: &Rc<RefCell<App>>, target: Target, a: i32, b: i32) {
     let then = {
         let mut app = app_rc.borrow_mut();
-        if app.in_background {
+        if input_paused(&app) {
             return;
         }
+        let this = (target, a.max(0) as usize, b.max(0) as usize);
+        let repeated = app.last_click == Some(this);
+        app.last_click = Some(this);
+        app.repeated_click = repeated;
         click(
             ui,
             &mut app,
@@ -430,7 +450,10 @@ fn click(ui: &AppWindow, app: &mut App, target: Target, a: usize, b: usize, step
             if a >= home.tab().games.len() {
                 return Then::Nothing;
             }
-            if home.zone == Zone::Icons && home.tab().focus == a && home.sheet.is_none() {
+            let repeated = app.repeated_click;
+            let home = &mut app.home;
+            if repeated && home.zone == Zone::Icons && home.tab().focus == a && home.sheet.is_none()
+            {
                 return Then::Action(Action::Confirm);
             }
             home.sheet = None;
@@ -453,7 +476,13 @@ fn click(ui: &AppWindow, app: &mut App, target: Target, a: usize, b: usize, step
             if a >= home.recent.len() {
                 return Then::Nothing;
             }
-            if home.zone == Zone::Recent && home.recent_focus == a && home.sheet.is_none() {
+            let repeated = app.repeated_click;
+            let home = &mut app.home;
+            if repeated
+                && home.zone == Zone::Recent
+                && home.recent_focus == a
+                && home.sheet.is_none()
+            {
                 return Then::Action(Action::Confirm);
             }
             home.sheet = None;
@@ -502,7 +531,9 @@ fn click(ui: &AppWindow, app: &mut App, target: Target, a: usize, b: usize, step
             })
         }
         // --- Controllers screen ---
-        Target::RemapRow if a == app.remap_selected => Then::Action(Action::Confirm),
+        Target::RemapRow if a == app.remap_selected && app.repeated_click => {
+            Then::Action(Action::Confirm)
+        }
         Target::RemapRow => {
             if a < controllers::ALL.len() && !app.capturing {
                 app.remap_selected = a;
@@ -525,7 +556,7 @@ fn click(ui: &AppWindow, app: &mut App, target: Target, a: usize, b: usize, step
             if a >= count {
                 return Then::Nothing;
             }
-            if *focus == a {
+            if *focus == a && app.repeated_click {
                 return Then::Action(Action::Confirm);
             }
             *focus = a;
@@ -541,7 +572,7 @@ fn click(ui: &AppWindow, app: &mut App, target: Target, a: usize, b: usize, step
             if a > 2 || b >= picker.choices[a].len() {
                 return Then::Nothing;
             }
-            if picker.slot == a && picker.focus[a] == b {
+            if picker.slot == a && picker.focus[a] == b && app.repeated_click {
                 return Then::Action(Action::Confirm);
             }
             picker.slot = a;
@@ -556,6 +587,9 @@ fn click(ui: &AppWindow, app: &mut App, target: Target, a: usize, b: usize, step
 /// Right click: back. The Controllers screen normally wants B held (a pad button is easy to
 /// brush); a click is deliberate, so it leaves at once.
 fn mouse_back(ui: &AppWindow, app_rc: &Rc<RefCell<App>>) {
+    if input_paused(&app_rc.borrow()) {
+        return;
+    }
     if app_rc.borrow().menus.overlay == Overlay::Controllers {
         leave_controllers_screen(ui, &mut app_rc.borrow_mut());
         return;
@@ -565,6 +599,9 @@ fn mouse_back(ui: &AppWindow, app_rc: &Rc<RefCell<App>>) {
 
 /// The wheel moves through whatever is on screen: lists up and down, rows left and right.
 fn mouse_wheel(ui: &AppWindow, app_rc: &Rc<RefCell<App>>, delta: i32) {
+    if delta == 0 || input_paused(&app_rc.borrow()) {
+        return;
+    }
     let vertical = {
         let mut app = app_rc.borrow_mut();
         let App { home, menus, .. } = &mut *app;
@@ -863,7 +900,7 @@ fn drain_background(ui: &AppWindow, app: &mut App) {
                 full,
                 thumbnail,
             } => {
-                let Some(picker) = app.art_picker.as_mut().filter(|p| p.game == game) else {
+                let Some(picker) = app.art_picker.as_mut().filter(|p| p.session == game) else {
                     continue;
                 };
                 if let Some(index) = picker.add(slot, path, label, hash, in_use, full) {
@@ -892,7 +929,7 @@ fn drain_background(ui: &AppWindow, app: &mut App) {
                 }
             }
             background::Event::ArtChoicesDone { game, error } => {
-                if let Some(picker) = app.art_picker.as_mut().filter(|p| p.game == game) {
+                if let Some(picker) = app.art_picker.as_mut().filter(|p| p.session == game) {
                     picker.searching = false;
                     if let Some(e) = error {
                         diag::log(&format!("art choices for {game}: {e}"));
@@ -1528,12 +1565,21 @@ fn open_art_picker(ui: &AppWindow, app: &mut App, game: usize) {
         game.art.logo.clone(),
     ];
     for (slot, art) in current.iter().enumerate() {
-        if art.is_none() {
+        // Without a background the cover fills the screen, so "None" is only in use when it
+        // was chosen.
+        let none_shown = if slot == 1 {
+            game.art.hero_off
+        } else {
+            art.is_none()
+        };
+        if none_shown {
             picker.none_in_use(slot);
         }
     }
+    app.art_sessions += 1;
+    picker.session = format!("{}#{}", game.id, app.art_sessions);
     let job = background::ChoicesJob {
-        game: game.id.clone(),
+        game: picker.session.clone(),
         title: game.title.clone(),
         cache: art_choices_dir(&data_dir).join(folder),
         current,

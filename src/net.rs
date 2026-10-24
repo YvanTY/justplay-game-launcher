@@ -3,7 +3,7 @@
 
 use std::ffi::c_void;
 use std::ptr::{null, null_mut};
-use std::sync::OnceLock;
+use std::sync::Mutex;
 
 use windows_sys::Win32::Foundation::GetLastError;
 use windows_sys::Win32::Networking::WinHttp::{
@@ -54,8 +54,19 @@ fn open(handle: *mut c_void, step: &str) -> Result<Handle, Error> {
 /// so the many small requests of an art search reuse one TLS connection instead of each
 /// paying for a new handshake. WinHTTP handles are safe to share between threads.
 fn session() -> Result<*mut c_void, Error> {
-    static SESSION: OnceLock<usize> = OnceLock::new();
-    let handle = *SESSION.get_or_init(|| unsafe {
+    static SESSION: Mutex<usize> = Mutex::new(0);
+    let mut session = SESSION.lock().unwrap_or_else(|e| e.into_inner());
+    if *session == 0 {
+        *session = unsafe { open_session() };
+    }
+    if *session == 0 {
+        return Err(Error::Failed("WinHttpOpen failed".into()));
+    }
+    Ok(*session as *mut c_void)
+}
+
+unsafe fn open_session() -> usize {
+    unsafe {
         let handle = WinHttpOpen(
             wide("GameLauncher/0.2").as_ptr(),
             WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY,
@@ -68,11 +79,7 @@ fn session() -> Result<*mut c_void, Error> {
             WinHttpSetTimeouts(handle, 10_000, 10_000, 15_000, 20_000);
         }
         handle as usize
-    });
-    if handle == 0 {
-        return Err(Error::Failed("WinHttpOpen failed".into()));
     }
-    Ok(handle as *mut c_void)
 }
 
 fn ok(result: i32, step: &str) -> Result<(), Error> {

@@ -221,31 +221,52 @@ pub fn art_turned_off(dir: &Path, stem: &str) -> bool {
     dir.join(format!("{stem}.none")).exists()
 }
 
-/// Makes `source` this slot's art in `dir` (None: a `.none` marker, no image). The first image
-/// ever replaced is kept in `_original`, so the art a game came with is never lost.
+/// Makes `source` this slot's art in `dir` (None: a `.none` marker, no image). Nothing is lost:
+/// the first image ever replaced stays in `_original`, the most recent one in `_previous` (so
+/// art dropped in by hand survives one more change), and the new file is copied before the old
+/// one moves, so a failed copy leaves the slot as it was.
 pub fn replace_art(dir: &Path, stem: &str, source: Option<&Path>) -> Result<(), String> {
+    const IMAGES: [&str; 4] = ["png", "jpg", "jpeg", "webp"];
     let fail = |e: std::io::Error| format!("Could not change the art in {}: {e}", dir.display());
     std::fs::create_dir_all(dir).map_err(fail)?;
+    let staged = match source {
+        Some(source) => {
+            let extension = source
+                .extension()
+                .map(|e| e.to_string_lossy().to_lowercase())
+                .filter(|e| IMAGES.contains(&e.as_str()))
+                .ok_or_else(|| format!("{} is not a PNG, JPEG or WebP image", source.display()))?;
+            let staged = dir.join(format!("{stem}.{extension}.part"));
+            std::fs::copy(source, &staged).map_err(fail)?;
+            Some((staged, dir.join(format!("{stem}.{extension}"))))
+        }
+        None => None,
+    };
     let original = dir.join("_original");
-    for extension in ["png", "jpg", "jpeg", "webp", "none"] {
+    let previous = dir.join("_previous");
+    for extension in IMAGES.iter().chain(&["none"]) {
         let old = dir.join(format!("{stem}.{extension}"));
         if !old.exists() {
             continue;
         }
-        if extension != "none" && find_image(&original, stem).is_none() {
-            std::fs::create_dir_all(&original).map_err(fail)?;
-            std::fs::rename(&old, original.join(format!("{stem}.{extension}"))).map_err(fail)?;
-        } else {
+        if *extension == "none" {
             std::fs::remove_file(&old).map_err(fail)?;
+            continue;
         }
+        let keep = if find_image(&original, stem).is_none() {
+            &original
+        } else {
+            // Only the latest replaced image is kept here.
+            for stale in IMAGES {
+                let _ = std::fs::remove_file(previous.join(format!("{stem}.{stale}")));
+            }
+            &previous
+        };
+        std::fs::create_dir_all(keep).map_err(fail)?;
+        std::fs::rename(&old, keep.join(format!("{stem}.{extension}"))).map_err(fail)?;
     }
-    match source {
-        Some(source) => {
-            let extension = source
-                .extension()
-                .map_or("jpg".into(), |e| e.to_string_lossy().to_lowercase());
-            std::fs::copy(source, dir.join(format!("{stem}.{extension}"))).map_err(fail)?;
-        }
+    match staged {
+        Some((staged, target)) => std::fs::rename(&staged, &target).map_err(fail)?,
         None => std::fs::write(dir.join(format!("{stem}.none")), b"").map_err(fail)?,
     }
     Ok(())
@@ -424,8 +445,18 @@ mod tests {
         assert_eq!(
             std::fs::read(dir.join("_original").join("icon.jpg")).unwrap(),
             b"first",
-            "only the first original is kept"
+            "the first original stays"
         );
+        assert_eq!(
+            std::fs::read(dir.join("_previous").join("icon.png")).unwrap(),
+            b"second",
+            "and the latest replaced image is kept too"
+        );
+        // A copy that can't happen changes nothing.
+        let missing = data.join("gone.png");
+        assert!(replace_art(&dir, "icon", Some(&missing)).is_err());
+        assert!(art_turned_off(&dir, "icon"));
+        assert!(replace_art(&dir, "icon", Some(&data.join("x.ico"))).is_err());
         let mut game = Game {
             id: "pc:Game".into(),
             title: "Game".into(),

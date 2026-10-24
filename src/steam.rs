@@ -307,7 +307,10 @@ pub fn save(url: &str, dir: &Path, name: &str) -> Result<bool, net::Error> {
     fs::create_dir_all(dir).map_err(|e| net::Error::Failed(format!("{}: {e}", dir.display())))?;
     let target = dir.join(format!("{name}.{extension}"));
     // Written aside then renamed, so a half-downloaded file is never shown.
-    let temp = target.with_extension("part");
+    // Unique per download: two workers fetching the same picture must not share a temp file.
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let temp = target.with_extension(format!("part{n}"));
     fs::write(&temp, &bytes)
         .and_then(|()| fs::rename(&temp, &target))
         .map_err(|e| net::Error::Failed(format!("{}: {e}", target.display())))?;

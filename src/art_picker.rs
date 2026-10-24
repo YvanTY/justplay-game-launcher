@@ -39,6 +39,8 @@ pub enum Effect {
 
 pub struct ArtPicker {
     pub game: String,
+    /// Tells this opening of the screen from an earlier one still finishing downloads.
+    pub session: String,
     pub title: String,
     /// The game's art folder, where the picked file goes.
     pub art_dir: PathBuf,
@@ -62,6 +64,7 @@ impl ArtPicker {
             }]
         };
         ArtPicker {
+            session: game.clone(),
             game,
             title,
             art_dir,
@@ -112,7 +115,7 @@ impl ArtPicker {
         );
         if in_use {
             self.focus[slot] = 0;
-        } else if self.focus[slot] >= index && self.focus[slot] > 0 {
+        } else if self.focus[slot] >= index {
             // Keep the focus on the same choice as the row grows under it.
             self.focus[slot] += 1;
         }
