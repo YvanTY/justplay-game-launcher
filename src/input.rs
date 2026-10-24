@@ -128,6 +128,7 @@ fn run(emit: impl Fn(InputEvent)) {
         gamepads: HashMap::new(),
         joysticks: HashMap::new(),
         combos: HashMap::new(),
+        held_at_open: HashMap::new(),
         virtual_pads: HashMap::new(),
         emulation_failed: false,
         own_pads: HashSet::new(),
@@ -188,6 +189,9 @@ struct Pads<F: Fn(InputEvent)> {
     joysticks: HashMap<u32, *mut SDL_Joystick>,
     /// Per device: Select and Start held state, when both went down, and whether it already fired.
     combos: HashMap<u32, Combo>,
+    /// Per pad: buttons already held when it was opened. They are ignored until released once,
+    /// so a button reported "down" at connection can't act as a fresh press.
+    held_at_open: HashMap<u32, HashSet<u8>>,
     /// Virtual Xbox pads keyed by the SDL id of the controller each one mirrors.
     virtual_pads: HashMap<u32, VirtualPad>,
     /// Set after a failed attempt so it isn't retried every poll; cleared when emulation stops.
@@ -236,6 +240,17 @@ impl<F: Fn(InputEvent)> Pads<F> {
                     ));
                 } else {
                     self.gamepads.insert(id.0, pad);
+                    let held: HashSet<u8> = (0..SDL_GamepadButton::COUNT.0)
+                        .filter(|&b| unsafe { SDL_GetGamepadButton(pad, SDL_GamepadButton(b)) })
+                        .map(|b| b as u8)
+                        .collect();
+                    if !held.is_empty() {
+                        diag::log(&format!(
+                            "pad {} had buttons held at connection: {held:?}",
+                            id.0
+                        ));
+                    }
+                    self.held_at_open.insert(id.0, held);
                     self.guids
                         .insert(id.0, guid_string(unsafe { SDL_GetGamepadGUIDForID(id) }));
                     let name = cstr(unsafe { SDL_GetGamepadName(pad) });
@@ -270,6 +285,14 @@ impl<F: Fn(InputEvent)> Pads<F> {
             }
             SDL_EVENT_GAMEPAD_BUTTON_DOWN | SDL_EVENT_GAMEPAD_BUTTON_UP => {
                 let b = unsafe { event.gbutton };
+                if let Some(held) = self.held_at_open.get_mut(&b.which.0)
+                    && held.contains(&b.button)
+                {
+                    if !b.down {
+                        held.remove(&b.button);
+                    }
+                    return;
+                }
                 let button = SDL_GamepadButton(b.button as i32);
                 // During a game only the home combo matters, so log presses then to trace it.
                 if IN_GAME.load(Ordering::Relaxed) {
@@ -421,6 +444,7 @@ impl<F: Fn(InputEvent)> Pads<F> {
         }
         self.sticks.remove(&id);
         self.combos.remove(&id);
+        self.held_at_open.remove(&id);
         self.triggers.retain(|&(device, _)| device != id);
     }
 

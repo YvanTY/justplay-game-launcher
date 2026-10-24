@@ -37,6 +37,8 @@ use state::{ControllerMode, State};
 slint::include_modules!();
 
 const TOAST_DURATION: Duration = Duration::from_millis(2600);
+/// How long input is ignored after the launcher appears.
+const INPUT_GRACE: Duration = Duration::from_millis(1000);
 /// Full-screen art loads only once the selection rests, so scrolling never stutters on decoding.
 const HERO_DELAY: Duration = Duration::from_millis(140);
 const HERO_CACHE: usize = 6;
@@ -63,6 +65,9 @@ struct App {
     /// Hold-B-to-exit on the Controllers screen: when B went down, and the ring's tick timer.
     back_hold_since: Option<std::time::Instant>,
     back_hold_timer: Timer,
+    /// Input is ignored until this moment: right after the window appears (startup or back from
+    /// a game) a stale press, or A still held as a game exits, must not start a game.
+    input_ready_at: std::time::Instant,
     /// None when the PC has no usable audio output; the launcher works silently then.
     audio: Option<Rc<Audio>>,
     music: Option<Rc<Music>>,
@@ -126,6 +131,7 @@ fn main() -> Result<(), slint::PlatformError> {
         controller_events,
         back_hold_since: None,
         back_hold_timer: Timer::default(),
+        input_ready_at: std::time::Instant::now() + INPUT_GRACE,
         audio,
         music,
         audio_timer: Timer::default(),
@@ -165,6 +171,10 @@ fn main() -> Result<(), slint::PlatformError> {
             let ui = weak.unwrap();
             // While a game has the screen, pads are only listened to for the home combo.
             if app.borrow().in_background {
+                return;
+            }
+            if std::time::Instant::now() < app.borrow().input_ready_at {
+                diag::log(&format!("ignored {action:?} during the input grace period"));
                 return;
             }
             if action == Action::Menu || app.borrow().menus.is_open() {
@@ -646,6 +656,7 @@ fn update_music(app: &App) {
 
 fn come_back(ui: &AppWindow, app: &mut App) {
     app.in_background = false;
+    app.input_ready_at = std::time::Instant::now() + INPUT_GRACE;
     play_sound(app, Sound::Confirm);
     input::IN_GAME.store(false, Ordering::Relaxed);
     if let Err(e) = ui.show() {
