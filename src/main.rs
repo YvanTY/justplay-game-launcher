@@ -131,6 +131,8 @@ struct App {
     repeated_click: bool,
     /// Hides the mouse pointer once it stops moving.
     pointer_timer: Timer,
+    /// A check of greyed-out games' files is running (see check_unavailable).
+    reach_check: bool,
     /// The action being handled came from a pad (not the keyboard, the mouse or a hint).
     pad_input: bool,
     /// Controllers screen: when each held pad button (index in controllers::ALL) went down,
@@ -244,6 +246,7 @@ fn main() -> Result<(), slint::PlatformError> {
         last_click: None,
         repeated_click: false,
         pointer_timer: Timer::default(),
+        reach_check: false,
         pad_input: false,
         held_since: HashMap::new(),
         holds_done: HashSet::new(),
@@ -984,6 +987,21 @@ fn drain_background(ui: &AppWindow, app: &mut App) {
                         picker.trouble = true;
                     }
                     sync_art_screen(ui, app);
+                }
+            }
+            background::Event::Reachable { ids } => {
+                app.reach_check = false;
+                if !ids.is_empty() && app.home.running.is_none() && !app.in_background {
+                    diag::log(&format!("games reachable again: {ids:?}"));
+                    match reload_library(ui, app) {
+                        Ok(_) => {
+                            let count = ids.len();
+                            let games = if count == 1 { "game is" } else { "games are" };
+                            app.toasts
+                                .show(ui, format!("{count} {games} available again"));
+                        }
+                        Err(e) => diag::log(&e),
+                    }
                 }
             }
             background::Event::Listing { dir, folders } => {
@@ -2595,6 +2613,7 @@ fn start_drive_watch(ui: &AppWindow, app_rc: &Rc<RefCell<App>>) {
             // A callback already holding the app (e.g. mid-reload) just skips this tick.
             if let (Some(ui), Ok(mut app)) = (weak.upgrade(), app.try_borrow_mut()) {
                 check_drives(&ui, &mut app);
+                check_unavailable(&mut app);
                 let now = std::time::Instant::now();
                 let due = app
                     .art_failed
@@ -2605,6 +2624,26 @@ fn start_drive_watch(ui: &AppWindow, app_rc: &Rc<RefCell<App>>) {
                 }
             }
         });
+}
+
+/// While the launcher is visible, greyed-out games' files are checked again in the background
+/// (every DRIVE_POLL); games that are back light up without a restart.
+fn check_unavailable(app: &mut App) {
+    if app.reach_check || app.in_background || app.home.running.is_some() {
+        return;
+    }
+    let games: Vec<(String, Vec<PathBuf>)> = app
+        .home
+        .games
+        .iter()
+        .filter(|g| g.missing.is_some())
+        .map(|g| (g.id.clone(), g.requires.clone()))
+        .collect();
+    if games.is_empty() {
+        return;
+    }
+    app.reach_check = true;
+    background::spawn_reach_check(app.notifier.clone(), games);
 }
 
 /// A drive was plugged in or out: reload so its games light up or grey out.

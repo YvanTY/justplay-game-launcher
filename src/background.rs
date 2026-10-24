@@ -53,6 +53,10 @@ pub enum Event {
         game: String,
         error: Option<String>,
     },
+    /// Greyed-out games whose files can all be reached again (their drive came back).
+    Reachable {
+        ids: Vec<String>,
+    },
     /// The folder browser's listing of `dir`.
     Listing {
         dir: PathBuf,
@@ -680,6 +684,25 @@ pub fn spawn_art_upgrade(
         });
     if let Err(e) = spawned {
         crate::diag::log(&format!("art upgrade could not start: {e}"));
+    }
+}
+
+/// Checks whether greyed-out games' files are back. Off the UI thread: a disk that is dropping
+/// out (as Yvan's external drive did) can take seconds to answer. A drive can also come back
+/// without its letter ever disappearing, so watching the drive letters isn't enough.
+pub fn spawn_reach_check(notifier: Notifier, games: Vec<(String, Vec<PathBuf>)>) {
+    let spawned = std::thread::Builder::new()
+        .name("reach-check".into())
+        .spawn(move || {
+            let ids = games
+                .into_iter()
+                .filter(|(_, requires)| requires.iter().all(|path| path.exists()))
+                .map(|(id, _)| id)
+                .collect();
+            notifier.send(Event::Reachable { ids });
+        });
+    if let Err(e) = spawned {
+        crate::diag::log(&format!("reach check could not start: {e}"));
     }
 }
 
