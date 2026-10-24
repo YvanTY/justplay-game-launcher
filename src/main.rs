@@ -13,6 +13,7 @@ mod library;
 mod menus;
 mod music;
 mod nav;
+mod scaled_art;
 mod state;
 
 use std::cell::RefCell;
@@ -366,7 +367,11 @@ fn push_selection(ui: &AppWindow, app: &mut App) {
     ui.set_is_favorite(home.is_favorite(index));
     ui.set_selected_running(home.running == Some(index));
     ui.set_backdrop(title_color(&game.title));
-    let logo = game.art.logo.as_deref().and_then(|p| images.icon(p));
+    let logo = game
+        .art
+        .logo
+        .as_deref()
+        .and_then(|p| images.small(p, scaled_art::Kind::Logo));
     ui.set_has_logo(logo.is_some());
     ui.set_logo(logo.unwrap_or_default());
 }
@@ -688,7 +693,11 @@ fn window_handle(ui: &AppWindow) -> Option<windows_sys::Win32::Foundation::HWND>
 }
 
 fn make_tile(game: &Game, images: &mut ImageCache) -> Tile {
-    let icon = game.art.icon.as_deref().and_then(|p| images.icon(p));
+    let icon = game
+        .art
+        .icon
+        .as_deref()
+        .and_then(|p| images.small(p, scaled_art::Kind::Icon));
     Tile {
         title: game.title.as_str().into(),
         color: title_color(&game.title),
@@ -701,19 +710,29 @@ fn make_tile(game: &Game, images: &mut ImageCache) -> Tile {
 #[derive(Default)]
 struct ImageCache {
     /// Small art (icons, logos), kept for the whole session. `None` remembers a failed load.
-    icons: HashMap<PathBuf, Option<Image>>,
+    /// Keyed by use too: one file set as both icon and logo is sized for each.
+    icons: HashMap<(PathBuf, scaled_art::Kind), Option<Image>>,
+    /// Screen scale the small art was sized for; a bigger screen appearing reloads it.
+    scale: f32,
     /// Full-screen art is large (8 MB decoded each), so only the most recent few are kept.
     heroes: VecDeque<(PathBuf, Image)>,
     problems: Vec<String>,
 }
 
 impl ImageCache {
-    fn icon(&mut self, path: &Path) -> Option<Image> {
-        if let Some(cached) = self.icons.get(path) {
+    fn small(&mut self, path: &Path, kind: scaled_art::Kind) -> Option<Image> {
+        let scale = scaled_art::screen_scale();
+        if scale > self.scale {
+            diag::log(&format!("small art sized for screen scale {scale}"));
+            self.icons.clear();
+            self.scale = scale;
+        }
+        let key = (path.to_path_buf(), kind);
+        if let Some(cached) = self.icons.get(&key) {
             return cached.clone();
         }
-        let image = self.load(path);
-        self.icons.insert(path.to_path_buf(), image.clone());
+        let image = scaled_art::load(path, kind, scale).or_else(|| self.load(path));
+        self.icons.insert(key, image.clone());
         image
     }
 

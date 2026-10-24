@@ -4,6 +4,8 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+# Same decoders Slint already builds; used to shrink small art to the size it is drawn at.
+image = { version = "0.25.10", default-features = false, features = ["png", "jpeg"] }
 raw-window-handle = "0.6"
 sdl3-sys = { version = "0.7.2", default-features = false }
 serde = { version = "1.0.229", features = ["derive"] }

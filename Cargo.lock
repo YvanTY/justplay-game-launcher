@@ -1262,6 +1262,7 @@ dependencies = [
 name = "game-launcher"
 version = "0.1.0"
 dependencies = [
+ "image",
  "raw-window-handle",
  "sdl3-sys",
  "serde",
