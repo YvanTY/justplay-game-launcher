@@ -17,9 +17,10 @@ use windows_sys::Win32::Devices::Display::{
     SDC_SAVE_TO_DATABASE, SDC_TOPOLOGY_CLONE, SDC_TOPOLOGY_EXTEND, SDC_USE_SUPPLIED_DISPLAY_CONFIG,
     SetDisplayConfig,
 };
-use windows_sys::Win32::Foundation::{LPARAM, RECT};
+use windows_sys::Win32::Foundation::{HWND, LPARAM, RECT};
 use windows_sys::Win32::Graphics::Gdi::{
-    EnumDisplayMonitors, GetMonitorInfoW, HDC, HMONITOR, MONITORINFOEXW,
+    EnumDisplayMonitors, GetMonitorInfoW, HDC, HMONITOR, MONITOR_DEFAULTTONULL, MONITORINFOEXW,
+    MonitorFromWindow,
 };
 
 /// Where the launcher, or a game, is shown.
@@ -165,6 +166,18 @@ pub fn screens() -> Vec<Screen> {
         };
     }
     screens
+}
+
+/// The screen (`\\.\DISPLAY2`) showing most of `window`.
+pub fn screen_of(window: HWND) -> Option<String> {
+    let monitor = unsafe { MonitorFromWindow(window, MONITOR_DEFAULTTONULL) };
+    if monitor.is_null() {
+        return None;
+    }
+    let mut info = MONITORINFOEXW::default();
+    info.monitorInfo.cbSize = std::mem::size_of::<MONITORINFOEXW>() as u32;
+    let ok = unsafe { GetMonitorInfoW(monitor, (&mut info as *mut MONITORINFOEXW).cast()) };
+    (ok != 0).then(|| text(&info.szDevice))
 }
 
 /// Device name (`\\.\DISPLAY1`) -> the monitor's own name, from Windows' display configuration.

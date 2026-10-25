@@ -697,6 +697,8 @@ export component AppWindow inherits Window {
     callback pad-action(Action);
     // Times holds on the Controllers screen.
     callback hold-tick();
+    // While a game runs: note which screen its window is on (diagnostics).
+    callback game-screen-check();
     // Empty message: the game ended normally; otherwise why it failed.
     callback game-ended(string);
     // A worker thread (background decoding, art download) has results waiting.

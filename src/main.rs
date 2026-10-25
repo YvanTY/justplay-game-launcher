@@ -152,6 +152,9 @@ struct App {
     remap_run: Option<controllers::RemapRun>,
     live_raw: u32,
     live_out: u32,
+    /// While a game runs: which screen its window was last seen on (logged when it changes).
+    game_screen_timer: Timer,
+    game_screen_seen: Option<String>,
 }
 
 fn main() -> Result<(), slint::PlatformError> {
@@ -268,6 +271,8 @@ fn main() -> Result<(), slint::PlatformError> {
         remap_run: None,
         live_raw: 0,
         live_out: 0,
+        game_screen_timer: Timer::default(),
+        game_screen_seen: None,
     }));
 
     {
@@ -328,6 +333,10 @@ fn main() -> Result<(), slint::PlatformError> {
         let weak = ui.as_weak();
         let app = app.clone();
         move || hold_tick(&weak.unwrap(), &mut app.borrow_mut())
+    });
+    ui.on_game_screen_check({
+        let app = app.clone();
+        move || game_screen_check(&mut app.borrow_mut())
     });
     let mouse = ui.global::<Mouse>();
     mouse.on_act({
@@ -1266,6 +1275,14 @@ fn start_game(ui: &AppWindow, app: &mut App, game: usize) {
             ));
             app.running = Some(running);
             app.home.running = Some(game);
+            app.game_screen_seen = None;
+            let weak = ui.as_weak();
+            app.game_screen_timer
+                .start(TimerMode::Repeated, Duration::from_secs(15), move || {
+                    if let Some(ui) = weak.upgrade() {
+                        ui.invoke_game_screen_check();
+                    }
+                });
             app.home.record_played(game, unix_now());
             if let Err(e) = app.home.state.save(&app.state_path) {
                 app.toasts.show(ui, e);
@@ -1280,6 +1297,23 @@ fn start_game(ui: &AppWindow, app: &mut App, game: usize) {
             show_launcher_on_its_screen(ui, app);
             app.toasts.show(ui, e);
         }
+    }
+}
+
+/// Logs the screen the running game's window is on, when it changes (games often open a
+/// small launcher first, then the real window).
+fn game_screen_check(app: &mut App) {
+    let Some(running) = &app.running else {
+        app.game_screen_timer.stop();
+        return;
+    };
+    let screen = launcher::game_window(running).and_then(display::screen_of);
+    if screen.is_some() && screen != app.game_screen_seen {
+        diag::log(&format!(
+            "game window is on {}",
+            screen.as_deref().unwrap_or("?")
+        ));
+        app.game_screen_seen = screen;
     }
 }
 
@@ -1301,7 +1335,16 @@ fn use_screen_layout(
         .clone()
         .unwrap_or_else(|| display::current(&screens));
     let wanted = display::wanted(choice, &original, for_game);
-    if wanted != display::current(&screens) {
+    let now = display::current(&screens);
+    let names: Vec<String> = screens
+        .iter()
+        .map(|s| format!("{} at ({}, {})", s.device, s.x, s.y))
+        .collect();
+    diag::log(&format!(
+        "screens for {}: chosen {choice:?}; connected {names:?}; now {now:?}; wanted {wanted:?}",
+        if for_game { "game" } else { "launcher" }
+    ));
+    if wanted != now {
         if state.display_restore.is_none() {
             state.display_restore = Some(original.clone());
             if let Err(e) = state.save(&app.state_path) {
@@ -1313,6 +1356,10 @@ fn use_screen_layout(
             app.toasts.show(ui, e);
             return;
         }
+        diag::log(&format!(
+            "screens switched; Windows now reports {:?}",
+            display::current(&display::screens())
+        ));
     }
     let state = &mut app.home.state;
     if wanted == original
@@ -1425,6 +1472,7 @@ fn game_ended(ui: &AppWindow, app: &mut App, message: &str) {
         .unwrap_or_default();
     app.running = None;
     app.home.running = None;
+    app.game_screen_timer.stop();
     input::set_translation(Translate::Off);
     // A sheet opened on the running game lists Resume / Close game, which no longer apply.
     app.home.sheet = None;
