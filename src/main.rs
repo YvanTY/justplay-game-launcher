@@ -452,6 +452,7 @@ fn main() -> Result<(), slint::PlatformError> {
         // and the callback only says "something arrived".
         let event = match event {
             InputEvent::Pads(_)
+            | InputEvent::OtherPadSwitch(_)
             | InputEvent::Live { .. }
             | InputEvent::Captured(_)
             | InputEvent::CaptureTimedOut => {
@@ -727,6 +728,16 @@ fn click(ui: &AppWindow, app: &mut App, target: Target, a: usize, b: usize, step
         }
         Target::RemapCommand => {
             remap_command(ui, app, a);
+            Then::Nothing
+        }
+        // A pad chip on the Controllers screen: show that pad.
+        Target::PadChip => {
+            let busy = app.remap_run.is_some() || app.capturing;
+            if a < app.pads.len() && !busy && a != app.pad_index {
+                app.pad_index = a;
+                play_sound(app, Sound::Tab);
+                sync_controllers_screen(ui, app);
+            }
             Then::Nothing
         }
         // --- Quit ---
@@ -3700,6 +3711,15 @@ fn drain_controller_events(ui: &AppWindow, app: &mut App) {
                 if app.pads.get(app.pad_index).map(|p| p.id) != shown {
                     stop_remap(ui, app);
                 }
+                push_pad_status(ui, app);
+            }
+            // Any pad can switch the pad shown, except while a remap or a capture runs.
+            InputEvent::OtherPadSwitch(delta) => {
+                let busy = app.remap_run.is_some() || app.capturing;
+                if app.menus.overlay == Overlay::Controllers && !busy && app.pads.len() > 1 {
+                    app.pad_index = nav::wrap_index(app.pad_index, app.pads.len(), delta);
+                    play_sound(app, Sound::Tab);
+                }
             }
             InputEvent::Live { raw, out } => {
                 let pressed = raw & !app.live_raw;
@@ -3743,6 +3763,23 @@ fn drain_controller_events(ui: &AppWindow, app: &mut App) {
     sync_controllers_screen(ui, app);
 }
 
+/// The connected pads with their battery levels: the Controllers screen's chips and the
+/// battery badges in the home screen's top bar.
+fn push_pad_status(ui: &AppWindow, app: &App) {
+    let views: Vec<PadView> = app
+        .pads
+        .iter()
+        .enumerate()
+        .map(|(i, pad)| PadView {
+            number: i as i32 + 1,
+            name: pad.name.as_str().into(),
+            percent: pad.battery.map_or(-1, |b| b.percent as i32),
+            charging: pad.battery.is_some_and(|b| b.charging),
+        })
+        .collect();
+    ui.set_pad_views(ModelRc::new(VecModel::from(views)));
+}
+
 fn save_remaps(ui: &AppWindow, app: &App) {
     if let Ok(mut remaps) = controllers::REMAPS.write() {
         *remaps = app.home.state.controller_remaps.clone();
@@ -3764,16 +3801,13 @@ fn sync_controllers_screen(ui: &AppWindow, app: &mut App) {
     if !open {
         return;
     }
-    let title = match (app.pads.get(app.pad_index), app.pads.len()) {
-        (None, _) => "No controller connected".to_string(),
-        (Some(pad), 1) => pad.name.clone(),
-        (Some(pad), n) => format!(
-            "{}  ·  {} of {n}  ·  hold LB / RB to switch",
-            pad.name,
-            app.pad_index + 1
-        ),
+    let title = match app.pads.len() {
+        0 => "No controller connected",
+        1 => "",
+        _ => "Hold LB / RB, press them on another controller, or click one to switch",
     };
     ui.set_controllers_title(title.into());
+    ui.set_pad_index(app.pad_index as i32);
     let profile = app
         .pads
         .get(app.pad_index)

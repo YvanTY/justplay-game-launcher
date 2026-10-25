@@ -5,7 +5,7 @@ export enum Action { up, down, left, right, confirm, back, options, tab-prev, ta
 export enum Zone { tabs, icons, actions, recent }
 
 // What a mouse click landed on; main.rs turns it into the same steps a controller would take.
-export enum Target { none, tab, gear, tile, play, more, recent, sheet-item, sheet-outside, dismiss, panel-tile, power-item, settings-row, settings-step, remap-row, hold-exit, add-row, art-thumb, remap-button, controller-mode, remap-command, keyboard-key, ask-quit, quit-choice }
+export enum Target { none, tab, gear, tile, play, more, recent, sheet-item, sheet-outside, dismiss, panel-tile, power-item, settings-row, settings-step, remap-row, hold-exit, add-row, art-thumb, remap-button, controller-mode, remap-command, keyboard-key, ask-quit, quit-choice, pad-chip }
 
 // Mouse input for the whole window. The pointer only shows while the mouse is being used.
 export global Mouse {
@@ -88,6 +88,58 @@ component PanelTile inherits Rectangle {
             color: white;
             horizontal-alignment: center;
         }
+    }
+}
+
+// A connected controller: its number, name and battery (-1: wired or not reported).
+export struct PadView {
+    number: int,
+    name: string,
+    percent: int,
+    charging: bool,
+}
+
+// A small battery with its level: green, amber under 50%, red under 20%; a bolt when charging.
+component BatteryBadge inherits HorizontalLayout {
+    in property <int> percent;
+    in property <bool> charging;
+    in property <length> u;
+    property <color> level: percent < 20 ? #ff5a5f : percent < 50 ? #f5b942 : #3ddc84;
+    spacing: 6 * u;
+    alignment: center;
+    VerticalLayout {
+        alignment: center;
+        Rectangle {
+            width: 30 * u;
+            height: 15 * u;
+            border-radius: 3 * u;
+            border-width: 1.5px;
+            border-color: #ffffffb3;
+            Rectangle {
+                x: 2.5 * u;
+                y: 2.5 * u;
+                width: (parent.width - 5 * u) * Math.max(percent, 4) / 100;
+                height: parent.height - 5 * u;
+                border-radius: 1.5 * u;
+                background: level;
+            }
+
+            // The battery's terminal.
+            Rectangle {
+                x: parent.width;
+                y: 4.5 * u;
+                width: 2.5 * u;
+                height: 6 * u;
+                background: #ffffffb3;
+            }
+        }
+    }
+
+    Text {
+        text: (charging ? "⚡" : "") + percent + "%";
+        font-size: 20 * u;
+        color: percent < 20 && !charging ? #ff5a5f : #ffffffcc;
+        vertical-alignment: center;
     }
 }
 
@@ -655,6 +707,9 @@ export component AppWindow inherits Window {
     in property <int> panel-index;
     // "Quit JustPlay?": 0 Quit, 1 Cancel.
     in property <int> quit-index;
+    // Connected controllers (home battery badges, Controllers screen chips) and the one shown.
+    in property <[PadView]> pad-views;
+    in property <int> pad-index;
     in property <int> power-index;
     in property <int> settings-index;
     in property <[string]> settings-values;
@@ -837,6 +892,28 @@ export component AppWindow inherits Window {
         height: 56 * u;
         spacing: 40 * u;
         alignment: end;
+        // Wireless controllers' battery, like a console's top bar.
+        HorizontalLayout {
+            spacing: 22 * u;
+            for pad in pad-views: HorizontalLayout {
+                visible: pad.percent >= 0;
+                width: pad.percent >= 0 ? self.preferred-width : 0;
+                spacing: 8 * u;
+                Glyph {
+                    text: "\u{E7FC}";
+                    font-size: 22 * u;
+                    color: #ffffffb3;
+                    vertical-alignment: center;
+                }
+
+                BatteryBadge {
+                    percent: pad.percent;
+                    charging: pad.charging;
+                    u: u;
+                }
+            }
+        }
+
         Rectangle {
             width: 56 * u;
             border-radius: 12 * u;
@@ -1435,13 +1512,50 @@ export component AppWindow inherits Window {
             color: white;
         }
 
-        Text {
+        // One chip per controller (number, name, battery); click one to show it.
+        HorizontalLayout {
             x: margin;
-            y: 96 * u;
-            text: controllers-title;
-            font-size: 22 * u;
-            font-weight: 300;
-            color: #ffffffb3;
+            y: 92 * u;
+            height: 46 * u;
+            spacing: 12 * u;
+            alignment: start;
+            for pad[i] in pad-views: Rectangle {
+                border-radius: 23 * u;
+                background: i == pad-index ? #2d8cff : chip-hit.has-hover && Mouse.visible ? #ffffff2e : #ffffff12;
+                border-width: 1px;
+                border-color: i == pad-index ? transparent : #ffffff1f;
+                HorizontalLayout {
+                    padding-left: 18 * u;
+                    padding-right: 18 * u;
+                    spacing: 10 * u;
+                    Text {
+                        text: pad.number + "  " + pad.name;
+                        font-size: 20 * u;
+                        font-weight: i == pad-index ? 600 : 400;
+                        color: white;
+                        vertical-alignment: center;
+                    }
+
+                    if pad.percent >= 0: BatteryBadge {
+                        percent: pad.percent;
+                        charging: pad.charging;
+                        u: u;
+                    }
+                }
+
+                chip-hit := Hit {
+                    target: Target.pad-chip;
+                    a: i;
+                }
+            }
+
+            Text {
+                text: controllers-title;
+                font-size: 18 * u;
+                font-weight: 300;
+                color: #ffffff80;
+                vertical-alignment: center;
+            }
         }
 
         // How the pad is read; click one, or hold LT / RT.

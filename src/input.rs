@@ -26,6 +26,9 @@ pub enum InputEvent {
         raw: u32,
         out: u32,
     },
+    /// LB (-1) or RB (+1) pressed on a pad the Controllers screen isn't showing: show the
+    /// previous or next pad (any pad can switch, not only the one shown).
+    OtherPadSwitch(isize),
     /// The key or button pressed while the Controllers screen was waiting for one.
     Captured(Trigger),
     /// Nothing was pressed in time; the screen stops waiting.
@@ -40,6 +43,35 @@ pub struct PadInfo {
     pub name: String,
     /// SDL's GUID string: the same for every pad of one model, used to key its remaps.
     pub guid: String,
+    /// Wireless pads that report it; None for wired ones (and pads that don't say).
+    pub battery: Option<Battery>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Battery {
+    pub percent: u8,
+    pub charging: bool,
+}
+
+/// How often battery levels are read again.
+const BATTERY_CHECK: Duration = Duration::from_secs(30);
+
+fn battery(pad: *mut SDL_Gamepad) -> Option<Battery> {
+    let mut percent: std::ffi::c_int = -1;
+    let state = unsafe { SDL_GetGamepadPowerInfo(pad, &mut percent) };
+    let charging = match state {
+        SDL_POWERSTATE_ON_BATTERY => false,
+        SDL_POWERSTATE_CHARGING => true,
+        SDL_POWERSTATE_CHARGED => {
+            percent = percent.max(100);
+            true
+        }
+        _ => return None,
+    };
+    (percent >= 0).then(|| Battery {
+        percent: percent.min(100) as u8,
+        charging,
+    })
 }
 
 /// SDL id of the pad shown in the Controllers screen (0 = screen closed): its buttons are streamed live.
@@ -142,6 +174,9 @@ fn run(emit: impl Fn(InputEvent)) {
         capture_keys: None,
         capture_mask: 0,
         capture_started: Instant::now(),
+        shoulders: HashMap::new(),
+        batteries_read: Instant::now(),
+        batteries: Vec::new(),
     };
     let mut event = SDL_Event::default();
     // SDL_WaitEvent re-polls open pads every ~1 ms, which costs real CPU with chatty
@@ -153,6 +188,7 @@ fn run(emit: impl Fn(InputEvent)) {
         pads.repeat_if_due();
         pads.update_emulation();
         pads.update_live_and_capture();
+        pads.update_batteries();
         // Gameplay through the virtual pad needs full-rate polling; otherwise a game only
         // needs the home combo watched.
         let interval = if IN_GAME.load(Ordering::Relaxed) && pads.virtual_pads.is_empty() {
@@ -213,6 +249,11 @@ struct Pads<F: Fn(InputEvent)> {
     /// Buttons already held when capture started.
     capture_mask: u32,
     capture_started: Instant,
+    /// LB / RB held on each pad not shown in the Controllers screen.
+    shoulders: HashMap<u32, (bool, bool)>,
+    /// When battery levels were last read, and what was reported.
+    batteries_read: Instant,
+    batteries: Vec<(u32, Option<Battery>)>,
 }
 
 #[derive(Default)]
@@ -627,7 +668,7 @@ impl<F: Fn(InputEvent)> Pads<F> {
         }
     }
 
-    fn emit_pads(&self) {
+    fn emit_pads(&mut self) {
         let mut pads: Vec<PadInfo> = self
             .gamepads
             .iter()
@@ -636,16 +677,62 @@ impl<F: Fn(InputEvent)> Pads<F> {
                 id,
                 name: cstr(unsafe { SDL_GetGamepadName(pad) }),
                 guid: self.guids.get(&id).cloned().unwrap_or_default(),
+                battery: battery(pad),
             })
             .collect();
         pads.sort_by_key(|pad| pad.id);
+        self.batteries = pads.iter().map(|p| (p.id, p.battery)).collect();
+        self.batteries_read = Instant::now();
         (self.emit)(InputEvent::Pads(pads));
+    }
+
+    /// Battery levels change slowly: read every BATTERY_CHECK, sent only when one changed.
+    fn update_batteries(&mut self) {
+        if self.batteries_read.elapsed() < BATTERY_CHECK {
+            return;
+        }
+        self.batteries_read = Instant::now();
+        let mut now: Vec<(u32, Option<Battery>)> = self
+            .gamepads
+            .iter()
+            .filter(|(id, _)| !self.own_pads.contains(id))
+            .map(|(&id, &pad)| (id, battery(pad)))
+            .collect();
+        now.sort_by_key(|(id, _)| *id);
+        if now != self.batteries {
+            self.emit_pads();
+        }
+    }
+
+    /// LB / RB pressed on a pad the Controllers screen isn't showing.
+    fn watch_other_pads(&mut self, live_id: u32) {
+        if live_id == 0 {
+            self.shoulders.clear();
+            return;
+        }
+        for (&id, &pad) in &self.gamepads {
+            if id == live_id || self.own_pads.contains(&id) {
+                continue;
+            }
+            let held = |button| unsafe { SDL_GetGamepadButton(pad, button) };
+            let now = (
+                held(SDL_GAMEPAD_BUTTON_LEFT_SHOULDER),
+                held(SDL_GAMEPAD_BUTTON_RIGHT_SHOULDER),
+            );
+            let before = self.shoulders.insert(id, now).unwrap_or(now);
+            if now.0 && !before.0 {
+                (self.emit)(InputEvent::OtherPadSwitch(-1));
+            } else if now.1 && !before.1 {
+                (self.emit)(InputEvent::OtherPadSwitch(1));
+            }
+        }
     }
 
     /// Streams the Controllers screen pad's buttons and, while capturing, reports the first
     /// newly pressed key or button.
     fn update_live_and_capture(&mut self) {
         let live_id = LIVE_PAD.load(Ordering::Relaxed);
+        self.watch_other_pads(live_id);
         let mask = self.gamepads.get(&live_id).map_or(0, |&pad| held_mask(pad));
         let out = self
             .guids
