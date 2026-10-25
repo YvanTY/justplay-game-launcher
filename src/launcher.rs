@@ -9,6 +9,7 @@ use std::time::{Duration, Instant};
 use windows_sys::Win32::Foundation::{
     CloseHandle, HANDLE, HWND, INVALID_HANDLE_VALUE, LPARAM, RECT, WAIT_FAILED,
 };
+use windows_sys::Win32::Graphics::Gdi::{MONITOR_DEFAULTTONULL, MonitorFromWindow};
 use windows_sys::Win32::System::Diagnostics::ToolHelp::{
     CreateToolhelp32Snapshot, PROCESSENTRY32W, Process32FirstW, Process32NextW, TH32CS_SNAPPROCESS,
 };
@@ -141,7 +142,8 @@ pub fn close(running: &Running) {
     }
 }
 
-/// The game's main window: the largest visible top-level window owned by one of its processes.
+/// The game's main window: the largest visible top-level window owned by one of its processes
+/// that is on a screen (or minimized). Games can keep hidden helper windows off every screen.
 pub fn game_window(running: &Running) -> Option<HWND> {
     struct Search {
         pids: Vec<u32>,
@@ -151,7 +153,10 @@ pub fn game_window(running: &Running) -> Option<HWND> {
         let search = unsafe { &mut *(param as *mut Search) };
         let mut pid = 0;
         unsafe { GetWindowThreadProcessId(hwnd, &mut pid) };
-        if search.pids.contains(&pid) && unsafe { IsWindowVisible(hwnd) } != 0 {
+        let placed = unsafe {
+            !MonitorFromWindow(hwnd, MONITOR_DEFAULTTONULL).is_null() || IsIconic(hwnd) != 0
+        };
+        if search.pids.contains(&pid) && unsafe { IsWindowVisible(hwnd) } != 0 && placed {
             let mut rect = RECT {
                 left: 0,
                 top: 0,
@@ -344,5 +349,35 @@ mod tests {
             args: vec![],
         };
         assert!(start(&launch, |_| {}).is_err());
+    }
+
+    /// Opens a stand-in window (the script at `STAND_IN_WINDOW`), finds it like a game's and moves
+    /// it to the screen that isn't the main one. Needs two screens; changes no display setting.
+    /// `$env:STAND_IN_WINDOW = "...ps1"; cargo test move_game_window -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn move_game_window() {
+        let script = std::env::var("STAND_IN_WINDOW").unwrap();
+        let mut child = Command::new("powershell")
+            .args(["-NoProfile", "-WindowStyle", "Hidden", "-ExecutionPolicy", "Bypass"])
+            .args(["-File", &script])
+            .spawn()
+            .unwrap();
+        std::thread::sleep(Duration::from_secs(4));
+        let running = Running {
+            dir: std::env::temp_dir().join("no-such-game-folder"),
+            root_pid: child.id(),
+        };
+        let window = game_window(&running).expect("stand-in window found");
+        let screens = crate::display::screens();
+        let other = screens.iter().find(|s| !s.primary).expect("two screens");
+        println!("before: {}", crate::display::describe_window(window));
+        crate::display::move_to(window, &other.device).unwrap();
+        std::thread::sleep(Duration::from_secs(1));
+        println!("after: {}", crate::display::describe_window(window));
+        let landed = crate::display::screen_of(window);
+        let _ = child.kill();
+        let _ = child.wait();
+        assert_eq!(landed.as_deref(), Some(other.device.as_str()));
     }
 }

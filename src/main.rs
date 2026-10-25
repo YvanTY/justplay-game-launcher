@@ -152,9 +152,12 @@ struct App {
     remap_run: Option<controllers::RemapRun>,
     live_raw: u32,
     live_out: u32,
-    /// While a game runs: which screen its window was last seen on (logged when it changes).
+    /// While a game runs: its window as last logged, how many checks ran, and how many times
+    /// it was moved to the chosen screen (games that pick their own monitor).
     game_screen_timer: Timer,
     game_screen_seen: Option<String>,
+    game_screen_checks: u32,
+    game_moves: u32,
 }
 
 fn main() -> Result<(), slint::PlatformError> {
@@ -273,6 +276,8 @@ fn main() -> Result<(), slint::PlatformError> {
         live_out: 0,
         game_screen_timer: Timer::default(),
         game_screen_seen: None,
+        game_screen_checks: 0,
+        game_moves: 0,
     }));
 
     {
@@ -1276,9 +1281,11 @@ fn start_game(ui: &AppWindow, app: &mut App, game: usize) {
             app.running = Some(running);
             app.home.running = Some(game);
             app.game_screen_seen = None;
+            app.game_screen_checks = 0;
+            app.game_moves = 0;
             let weak = ui.as_weak();
             app.game_screen_timer
-                .start(TimerMode::Repeated, Duration::from_secs(15), move || {
+                .start(TimerMode::Repeated, GAME_CHECK_EARLY, move || {
                     if let Some(ui) = weak.upgrade() {
                         ui.invoke_game_screen_check();
                     }
@@ -1300,20 +1307,47 @@ fn start_game(ui: &AppWindow, app: &mut App, game: usize) {
     }
 }
 
-/// Logs the screen the running game's window is on, when it changes (games often open a
-/// small launcher first, then the real window).
+/// Checks on the running game's window often while it starts (a wrong screen is fixed fast),
+/// then rarely.
+const GAME_CHECK_EARLY: Duration = Duration::from_secs(3);
+const GAME_CHECK_LATER: Duration = Duration::from_secs(15);
+const GAME_EARLY_CHECKS: u32 = 40;
+/// A game that keeps moving itself back is left where it wants to be.
+const GAME_MOVES: u32 = 3;
+
+/// While a game runs: logs where its window is (when that changes) and, if a screen was chosen
+/// for games and the game opened elsewhere (some pick their own monitor), moves it there.
 fn game_screen_check(app: &mut App) {
     let Some(running) = &app.running else {
         app.game_screen_timer.stop();
         return;
     };
-    let screen = launcher::game_window(running).and_then(display::screen_of);
-    if screen.is_some() && screen != app.game_screen_seen {
-        diag::log(&format!(
-            "game window is on {}",
-            screen.as_deref().unwrap_or("?")
-        ));
-        app.game_screen_seen = screen;
+    app.game_screen_checks += 1;
+    if app.game_screen_checks == GAME_EARLY_CHECKS {
+        app.game_screen_timer.set_interval(GAME_CHECK_LATER);
+    }
+    let Some(window) = launcher::game_window(running) else {
+        if app.game_screen_seen.as_deref() != Some("none") {
+            diag::log("no game window on any screen yet");
+            app.game_screen_seen = Some("none".into());
+        }
+        return;
+    };
+    let screen = display::screen_of(window);
+    let seen = format!("{} on {screen:?}", display::describe_window(window));
+    if app.game_screen_seen.as_deref() != Some(&seen) {
+        diag::log(&format!("game window {seen}"));
+        app.game_screen_seen = Some(seen);
+    }
+    if let display::ScreenChoice::Screen(target) = &app.home.state.game_screen
+        && screen.as_deref() != Some(target.as_str())
+        && app.game_moves < GAME_MOVES
+    {
+        app.game_moves += 1;
+        match display::move_to(window, target) {
+            Ok(()) => diag::log(&format!("moved the game window to {target}")),
+            Err(e) => diag::log(&e),
+        }
     }
 }
 

@@ -22,6 +22,9 @@ use windows_sys::Win32::Graphics::Gdi::{
     EnumDisplayMonitors, GetMonitorInfoW, HDC, HMONITOR, MONITOR_DEFAULTTONULL, MONITORINFOEXW,
     MonitorFromWindow,
 };
+use windows_sys::Win32::UI::WindowsAndMessaging::{
+    GetWindowRect, GetWindowTextW, SWP_NOACTIVATE, SWP_NOZORDER, SetWindowPos,
+};
 
 /// Where the launcher, or a game, is shown.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -178,6 +181,53 @@ pub fn screen_of(window: HWND) -> Option<String> {
     info.monitorInfo.cbSize = std::mem::size_of::<MONITORINFOEXW>() as u32;
     let ok = unsafe { GetMonitorInfoW(monitor, (&mut info as *mut MONITORINFOEXW).cast()) };
     (ok != 0).then(|| text(&info.szDevice))
+}
+
+/// Moves `window` to cover the screen `device`. Borderless and windowed games follow; a game
+/// in exclusive full screen may ignore it.
+pub fn move_to(window: HWND, device: &str) -> Result<(), String> {
+    let screen = screens()
+        .into_iter()
+        .find(|s| s.device == device)
+        .ok_or_else(|| format!("{device} isn't connected"))?;
+    let ok = unsafe {
+        SetWindowPos(
+            window,
+            null_mut(),
+            screen.x,
+            screen.y,
+            screen.width,
+            screen.height,
+            SWP_NOZORDER | SWP_NOACTIVATE,
+        )
+    };
+    if ok == 0 {
+        return Err(format!(
+            "Windows refused to move the game window to {device}"
+        ));
+    }
+    Ok(())
+}
+
+/// A window's title and position, for the log.
+pub fn describe_window(window: HWND) -> String {
+    let mut title = [0u16; 128];
+    let len = unsafe { GetWindowTextW(window, title.as_mut_ptr(), title.len() as i32) };
+    let mut rect = RECT {
+        left: 0,
+        top: 0,
+        right: 0,
+        bottom: 0,
+    };
+    unsafe { GetWindowRect(window, &mut rect) };
+    format!(
+        "\"{}\" at ({}, {}) {}x{}",
+        String::from_utf16_lossy(&title[..len.max(0) as usize]),
+        rect.left,
+        rect.top,
+        rect.right - rect.left,
+        rect.bottom - rect.top
+    )
 }
 
 /// Device name (`\\.\DISPLAY1`) -> the monitor's own name, from Windows' display configuration.
