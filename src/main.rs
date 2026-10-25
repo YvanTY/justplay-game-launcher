@@ -948,6 +948,7 @@ fn push_selection(ui: &AppWindow, app: &mut App) {
 /// Cheap per-keypress values: focus positions, zone and the game sheet.
 fn push_scalars(ui: &AppWindow, home: &Home) {
     ui.set_library_empty(home.games.is_empty());
+    ui.set_background_dim(home.state.settings.background_dim as f32 / 100.0);
     ui.set_zone(home.zone);
     ui.set_gear_focused(home.gear && home.zone == Zone::Tabs);
     ui.set_selected(home.tab().focus as i32);
@@ -2011,6 +2012,11 @@ fn handle_menu_action(ui: &AppWindow, app: &mut App, action: Action) {
                     }
                     Setting::MusicVolume => {
                         settings.music_volume = state::Settings::step(settings.music_volume, delta)
+                    }
+                    Setting::BackgroundDim => {
+                        settings.background_dim =
+                            state::Settings::step(settings.background_dim, delta);
+                        ui.set_background_dim(settings.background_dim as f32 / 100.0);
                     }
                     Setting::LauncherScreen => {
                         let screens = display::screens();
@@ -3285,6 +3291,10 @@ fn push_menus(ui: &AppWindow, app: &App) {
         .map(|setting| match setting {
             Setting::SoundVolume => format!("{}%", settings.sound_volume).into(),
             Setting::MusicVolume => format!("{}%", settings.music_volume).into(),
+            Setting::BackgroundDim => match settings.background_dim {
+                0 => "Off".into(),
+                dim => format!("{dim}%").into(),
+            },
             Setting::LauncherScreen => {
                 display::describe(&app.home.state.launcher_screen, &screens).into()
             }

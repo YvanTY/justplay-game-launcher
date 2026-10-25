@@ -656,6 +656,8 @@ export component AppWindow inherits Window {
     in property <bool> capture-can-clear;
     // No games at all yet (first start): Home shows the welcome screen.
     in property <bool> library-empty;
+    // Settings > Background dimming, 0-1.
+    in property <float> background-dim;
     // The button lit on the picture and its row: the focused one (Focus mode) or the one being
     // remapped; -1 for none (Test mode).
     in property <int> remap-highlight: -1;
@@ -741,6 +743,13 @@ export component AppWindow inherits Window {
         image-fit: cover;
         opacity: has-hero && !show-a ? 1 : 0;
         animate opacity { duration: 450ms; easing: ease-in-out; }
+    }
+
+    // Settings > Background dimming: darkens the art evenly (at most 85%, so it never goes black).
+    Rectangle {
+        background: black;
+        opacity: background-dim * 0.85;
+        animate opacity { duration: 150ms; }
     }
 
     // Scrims keep text readable on bright art: left for the logo, top for the row, bottom for cards.
@@ -1216,13 +1225,13 @@ export component AppWindow inherits Window {
     }
 
     if overlay == 3: Rectangle {
-        property <[string]> labels: ["UI sounds volume", "Music volume", "Launcher screen", "Games play on", "Game sound"];
+        property <[string]> labels: ["UI sounds volume", "Music volume", "Background dimming", "Launcher screen", "Games play on", "Game sound"];
         Hit { }
 
         x: (root.width - self.width) / 2;
         y: (root.height - self.height) / 2;
         width: 1100 * u;
-        height: 746 * u;
+        height: 842 * u;
         border-radius: 24 * u;
         background: #0f1522f7;
         border-width: 1px;

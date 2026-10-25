@@ -56,14 +56,16 @@ pub const POWER: [PowerItem; 4] = [
 pub enum Setting {
     SoundVolume,
     MusicVolume,
+    BackgroundDim,
     LauncherScreen,
     GameScreen,
     GameSound,
 }
 
-pub const SETTINGS: [Setting; 5] = [
+pub const SETTINGS: [Setting; 6] = [
     Setting::SoundVolume,
     Setting::MusicVolume,
+    Setting::BackgroundDim,
     Setting::LauncherScreen,
     Setting::GameScreen,
     Setting::GameSound,

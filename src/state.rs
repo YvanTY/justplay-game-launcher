@@ -42,12 +42,14 @@ pub struct State {
     pub art_lookup_version: u32,
 }
 
-/// User preferences from the Settings page. Volumes are percentages in steps of 10.
+/// User preferences from the Settings page. Percentages in steps of 10.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Settings {
     pub sound_volume: u8,
     pub music_volume: u8,
+    /// How much darker the background art is drawn (0: as it is).
+    pub background_dim: u8,
 }
 
 impl Default for Settings {
@@ -55,12 +57,13 @@ impl Default for Settings {
         Settings {
             sound_volume: 80,
             music_volume: 60,
+            background_dim: 0,
         }
     }
 }
 
 impl Settings {
-    /// Steps a volume by 10 points, clamped to 0-100.
+    /// Steps a percentage by 10 points, clamped to 0-100.
     pub fn step(value: u8, delta: i32) -> u8 {
         (value as i32 + delta * 10).clamp(0, 100) as u8
     }
