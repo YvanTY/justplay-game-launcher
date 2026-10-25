@@ -25,6 +25,7 @@ mod sgdb;
 mod sound_output;
 mod state;
 mod steam;
+mod update;
 
 use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
@@ -465,6 +466,17 @@ fn main() -> Result<(), slint::PlatformError> {
                 let mut app = app.borrow_mut();
                 restore_screens(&mut app);
                 show_launcher_on_its_screen(&ui, &mut app);
+            }
+        }
+    });
+    // A while after start, so it never competes with loading art: is a newer JustPlay out?
+    slint::Timer::single_shot(UPDATE_CHECK_DELAY, {
+        let app = app.clone();
+        move || {
+            let app = app.borrow();
+            let last = app.home.state.update_checked;
+            if unix_now().saturating_sub(last) >= update::CHECK_EVERY {
+                background::spawn_update_check(app.notifier.clone());
             }
         }
     });
@@ -1113,6 +1125,30 @@ fn drain_background(ui: &AppWindow, app: &mut App) {
                     }
                 }
             }
+            background::Event::LatestRelease(result) => match result {
+                Ok(latest) => {
+                    let state = &mut app.home.state;
+                    state.update_checked = unix_now();
+                    let newer = update::is_newer(&latest.version, env!("CARGO_PKG_VERSION"));
+                    let first_time = newer && state.update.as_ref() != Some(&latest);
+                    state.update = newer.then_some(latest.clone());
+                    if let Err(e) = state.save(&app.state_path) {
+                        diag::log(&e);
+                    }
+                    if first_time {
+                        app.toasts.show(
+                            ui,
+                            format!(
+                                "JustPlay {} is available · Settings to download",
+                                latest.version
+                            ),
+                        );
+                    }
+                    push_menus(ui, app);
+                }
+                // Offline: asked again at the next start.
+                Err(e) => diag::log(&e),
+            },
             background::Event::Ps3Music { id, result } => match result {
                 Ok(music) => {
                     diag::log(&format!("PS3 menu music ready for {id}"));
@@ -1173,6 +1209,18 @@ fn hero_loaded(ui: &AppWindow, app: &mut App, path: PathBuf, pixels: Option<scal
         None => {}
     }
 }
+
+/// A newer release found by the update check, unless this version has caught up since.
+fn available_update(app: &App) -> Option<&update::Update> {
+    app.home
+        .state
+        .update
+        .as_ref()
+        .filter(|u| update::is_newer(&u.version, env!("CARGO_PKG_VERSION")))
+}
+
+/// How long after start the daily update check runs.
+const UPDATE_CHECK_DELAY: Duration = Duration::from_secs(15);
 
 /// PS3 games with menu music (SND0.AT3) and no music yet get it converted in the background,
 /// once per session; the result is cached, so later starts play it at once.
@@ -1970,6 +2018,14 @@ fn handle_menu_action(ui: &AppWindow, app: &mut App, action: Action) {
     }
     if app.menus.overlay == Overlay::AddGames && action != Action::Menu {
         handle_add_games_action(ui, app, action);
+        return;
+    }
+    // Y in Settings: the newer version's download page, when there is one.
+    if app.menus.overlay == Overlay::Settings && action == Action::Options {
+        if let Some(page) = available_update(app).map(|u| u.page.clone()) {
+            play_sound(app, Sound::Confirm);
+            report(ui, app, update::open_page(&page));
+        }
         return;
     }
     let snapshot = |m: &Menus| (m.overlay, m.panel_focus, m.power_focus, m.settings_focus);
@@ -3303,6 +3359,18 @@ fn push_menus(ui: &AppWindow, app: &App) {
         })
         .collect();
     ui.set_settings_values(ModelRc::new(VecModel::from(values)));
+    match available_update(app) {
+        Some(update) => {
+            ui.set_update_ready(true);
+            ui.set_version_text(
+                format!("Update to {} available  ·  Y to download", update.version).into(),
+            );
+        }
+        None => {
+            ui.set_update_ready(false);
+            ui.set_version_text(format!("JustPlay {}", env!("CARGO_PKG_VERSION")).into());
+        }
+    }
     if menus.is_open() {
         ui.set_date(local_date().into());
     }

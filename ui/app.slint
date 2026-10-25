@@ -658,6 +658,9 @@ export component AppWindow inherits Window {
     in property <bool> library-empty;
     // Settings > Background dimming, 0-1.
     in property <float> background-dim;
+    // Bottom of Settings: "JustPlay 0.2.0", or a newer version to download.
+    in property <string> version-text;
+    in property <bool> update-ready;
     // The button lit on the picture and its row: the focused one (Focus mode) or the one being
     // remapped; -1 for none (Test mode).
     in property <int> remap-highlight: -1;
@@ -1322,6 +1325,23 @@ export component AppWindow inherits Window {
             text: "Left / Right to change  ·  B to go back";
             font-size: 22 * u;
             color: #ffffff80;
+        }
+
+        // The version, or a newer one to download (Y or a click opens its page).
+        Text {
+            x: parent.width - self.width - 56 * u;
+            y: parent.height - 70 * u;
+            text: version-text;
+            font-size: 22 * u;
+            font-weight: update-ready ? 600 : 400;
+            color: update-ready ? (version-hit.has-hover && Mouse.visible ? #8cc4ff : #5aa9ff) : #ffffff59;
+            version-hit := TouchArea {
+                enabled: update-ready;
+                mouse-cursor: update-ready && Mouse.visible ? MouseCursor.pointer : MouseCursor.default;
+                clicked => {
+                    Mouse.act(Action.options);
+                }
+            }
         }
     }
 

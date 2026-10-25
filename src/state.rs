@@ -36,6 +36,10 @@ pub struct State {
     pub sound_routed: Vec<String>,
     /// Where games' sound goes (Settings).
     pub game_sound: crate::sound_output::SoundChoice,
+    /// When GitHub was last asked for a newer release (Unix seconds), and the newer release
+    /// found, offered in Settings until this version catches up.
+    pub update_checked: u64,
+    pub update: Option<crate::update::Update>,
     /// Game id -> Steam app id its art came from (None: no Steam app). Looked up once.
     pub art_lookups: HashMap<String, Option<u32>>,
     /// Version of the art lookup that filled `art_lookups`; a newer lookup retries the misses.

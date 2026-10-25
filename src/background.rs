@@ -75,6 +75,8 @@ pub enum Event {
         id: String,
         result: Result<PathBuf, String>,
     },
+    /// GitHub's latest release, newer or not.
+    LatestRelease(Result<crate::update::Update, String>),
 }
 
 pub enum ArtOutcome {
@@ -716,6 +718,15 @@ pub fn spawn_ps3_music(notifier: Notifier, jobs: Vec<(String, library::Snd0, Pat
         });
     if let Err(e) = spawned {
         crate::diag::log(&format!("PS3 music conversion could not start: {e}"));
+    }
+}
+
+pub fn spawn_update_check(notifier: Notifier) {
+    let spawned = std::thread::Builder::new()
+        .name("update-check".into())
+        .spawn(move || notifier.send(Event::LatestRelease(crate::update::latest())));
+    if let Err(e) = spawned {
+        crate::diag::log(&format!("update check could not start: {e}"));
     }
 }
 
