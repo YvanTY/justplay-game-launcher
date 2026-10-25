@@ -1974,11 +1974,13 @@ export component AppWindow inherits Window {
 
     // --- Choose art screen ---
     if overlay == 6: Rectangle {
-        // Per row: top, thumbnail size (covers portrait, backgrounds wide, logos on a plate).
+        // Per row: top, thumbnail size (covers portrait, backgrounds wide, logos on a plate,
+        // trailers for music wide).
         property <[{y: length, w: length, h: length}]> rows: [
-            { y: 200 * u, w: 150 * u, h: 225 * u },
-            { y: 506 * u, w: 340 * u, h: 191 * u },
-            { y: 790 * u, w: 320 * u, h: 140 * u },
+            { y: 186 * u, w: 120 * u, h: 180 * u },
+            { y: 436 * u, w: 280 * u, h: 158 * u },
+            { y: 664 * u, w: 260 * u, h: 114 * u },
+            { y: 848 * u, w: 208 * u, h: 117 * u },
         ];
         property <length> gap: 22 * u;
         background: @radial-gradient(circle, #1a2744 0%, #0d1320 45%, #080b12 100%);
@@ -2085,7 +2087,7 @@ export component AppWindow inherits Window {
 
             ButtonHint {
                 key: "↑ ↓";
-                label: "Cover / Background / Logo";
+                label: "Cover / Background / Logo / Music";
                 u: u;
             }
 

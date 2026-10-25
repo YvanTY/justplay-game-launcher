@@ -124,7 +124,7 @@ struct App {
     /// The Choose art screen while open, its thumbnails (same order as its choices), and the
     /// switch that stops its downloads.
     art_picker: Option<art_picker::ArtPicker>,
-    art_thumbs: [Vec<Image>; 3],
+    art_thumbs: [Vec<Image>; 4],
     art_cancel: Arc<AtomicBool>,
     /// (game id, slot) -> (token, art folder) of a picked preview whose sharp version is on
     /// its way; a later pick for the same slot replaces the token, so a late arrival is ignored.
@@ -174,6 +174,8 @@ struct App {
     pending_emulator: Option<(PathBuf, &'static emulators::Preset)>,
     /// Looks every hour whether the daily update check is due.
     update_timer: Timer,
+    /// Games whose trailer music was queued this session.
+    music_queued: HashSet<String>,
 }
 
 fn main() -> Result<(), slint::PlatformError> {
@@ -300,6 +302,7 @@ fn main() -> Result<(), slint::PlatformError> {
         renaming: None,
         pending_emulator: None,
         update_timer: Timer::default(),
+        music_queued: HashSet::new(),
     }));
 
     {
@@ -316,6 +319,7 @@ fn main() -> Result<(), slint::PlatformError> {
         update_music(&app);
         queue_art_lookups(&mut app);
         queue_ps3_music(&mut app);
+        queue_trailer_music(&mut app);
         problems.append(&mut app.images.problems);
         for problem in &problems {
             diag::log(problem);
@@ -762,7 +766,7 @@ fn click(ui: &AppWindow, app: &mut App, target: Target, a: usize, b: usize, step
             let Some(picker) = app.art_picker.as_mut() else {
                 return Then::Nothing;
             };
-            if a > 2 || b >= picker.choices[a].len() {
+            if a >= art_picker::SLOTS.len() || b >= picker.choices[a].len() {
                 return Then::Nothing;
             }
             if picker.slot == a && picker.focus[a] == b && app.repeated_click {
@@ -1205,6 +1209,48 @@ fn drain_background(ui: &AppWindow, app: &mut App) {
                 }
                 // Offline: asked again at the next start.
                 Err(e) => diag::log(&e),
+            },
+            background::Event::TrailerMusic { id, result, picked } => match result {
+                Ok(found) => {
+                    let state = &mut app.home.state;
+                    state
+                        .music_lookups
+                        .insert(id.clone(), found.as_ref().map(|(_, trailer)| *trailer));
+                    if let Err(e) = state.save(&app.state_path) {
+                        diag::log(&e);
+                    }
+                    let Some((music, trailer)) = found else {
+                        continue;
+                    };
+                    if picked {
+                        let dir = music.parent().map(Path::to_path_buf).unwrap_or_default();
+                        if let Err(e) = library::set_music(&dir, true) {
+                            diag::log(&e);
+                        }
+                        app.toasts.show(ui, "Music ready".into());
+                    }
+                    if let Some(game) = app.home.games.iter_mut().find(|g| g.id == id) {
+                        game.art.music = Some(music);
+                    }
+                    // The Choose art screen marks the trailer now in use.
+                    if let Some(picker) = app.art_picker.as_mut().filter(|p| p.game == id) {
+                        let prefix = format!("{trailer} ");
+                        if let Some(index) = picker.choices[3]
+                            .iter()
+                            .position(|c| c.full.as_deref().is_some_and(|f| f.starts_with(&prefix)))
+                        {
+                            picker.applied(3, index);
+                        }
+                        sync_art_screen(ui, app);
+                    }
+                    update_music(app);
+                }
+                Err(e) => {
+                    diag::log(&format!("trailer music for {id}: {e}"));
+                    if picked {
+                        app.toasts.show(ui, format!("Couldn't get the music: {e}"));
+                    }
+                }
             },
             background::Event::Ps3Music { id, result } => match result {
                 Ok(music) => {
@@ -1661,7 +1707,8 @@ fn game_screen_check(app: &mut App) {
         diag::log(&format!("game window {seen}"));
         app.game_screen_seen = Some(seen);
     }
-    if let display::ScreenChoice::Screen(target) = &app.home.state.game_screen
+    let chosen = display::effective(&app.home.state.game_screen, &display::screens());
+    if let display::ScreenChoice::Screen(target) = &chosen
         && screen.as_deref() != Some(target.as_str())
         && app.game_moves < GAME_MOVES
     {
@@ -1724,9 +1771,12 @@ fn screen_sound_output(
     choice: &display::ScreenChoice,
     outputs: &[sound_output::Output],
 ) -> Option<sound_output::Output> {
-    let display::ScreenChoice::Screen(device) = choice else {
+    // A screen that isn't connected has no sound to follow: the game's sound stays put.
+    let display::ScreenChoice::Screen(device) = display::effective(choice, &display::screens())
+    else {
         return None;
     };
+    let device = &device;
     let Some(monitor) = display::monitor_name(device) else {
         diag::log(&format!(
             "{device} has no monitor name: its sound output can't be found"
@@ -1779,6 +1829,8 @@ fn use_screen_layout(
     for_game: bool,
 ) {
     let screens = display::screens();
+    // A chosen screen that isn't connected means the main screen.
+    let choice = &display::effective(choice, &screens);
     let state = &mut app.home.state;
     if screens.len() < 2 && state.display_restore.is_none() {
         return;
@@ -2348,6 +2400,16 @@ fn open_art_picker(ui: &AppWindow, app: &mut App, game: usize) {
             picker.none_in_use(slot);
         }
     }
+    if game.art.music.is_none() {
+        picker.none_in_use(3);
+    }
+    let music_in_use = app
+        .home
+        .state
+        .music_lookups
+        .get(&game.id)
+        .copied()
+        .flatten();
     app.art_sessions += 1;
     picker.session = format!("{}#{}", game.id, app.art_sessions);
     let job = background::ChoicesJob {
@@ -2358,6 +2420,7 @@ fn open_art_picker(ui: &AppWindow, app: &mut App, game: usize) {
         scale: scaled_art::screen_scale(),
         sgdb_key: app.sgdb_key.clone(),
         game_dir: game.launch.exe.parent().map(Path::to_path_buf),
+        music_in_use,
     };
     app.art_cancel.store(true, Ordering::Relaxed);
     app.art_cancel = Arc::new(AtomicBool::new(false));
@@ -2416,6 +2479,10 @@ fn apply_art(ui: &AppWindow, app: &mut App, slot: usize, index: usize) {
     let choice = picker.choices[slot][index].clone();
     let dir = picker.art_dir.clone();
     let game_id = picker.game.clone();
+    if slot == 3 {
+        apply_music(ui, app, index, choice, dir, game_id);
+        return;
+    }
     if let Err(e) = library::replace_art(&dir, art_picker::SLOTS[slot], choice.path.as_deref()) {
         diag::log(&e);
         app.toasts.show(ui, e);
@@ -2439,6 +2506,83 @@ fn apply_art(ui: &AppWindow, app: &mut App, slot: usize, index: usize) {
         }
     }
     refresh_game_art(ui, app, &game_id, &dir);
+}
+
+/// The Music row: a trailer's soundtrack becomes the game's music (fetched in the background),
+/// or None turns music off.
+fn apply_music(
+    ui: &AppWindow,
+    app: &mut App,
+    index: usize,
+    choice: art_picker::Choice,
+    dir: PathBuf,
+    game_id: String,
+) {
+    let Some(full) = choice.full else {
+        if let Err(e) = library::set_music(&dir, false) {
+            app.toasts.show(ui, e);
+            return;
+        }
+        if let Some(picker) = app.art_picker.as_mut() {
+            picker.applied(3, index);
+        }
+        if let Some(game) = app.home.games.iter_mut().find(|g| g.id == game_id) {
+            game.art.music = None;
+            game.art.snd0 = None;
+        }
+        update_music(app);
+        app.toasts.show(ui, "No music for this game".into());
+        return;
+    };
+    let Some((trailer, stream)) = full
+        .split_once(' ')
+        .and_then(|(id, stream)| Some((id.parse::<u64>().ok()?, stream.to_string())))
+    else {
+        return;
+    };
+    app.toasts.show(
+        ui,
+        "Getting the music from the trailer… (about 15 seconds)".into(),
+    );
+    background::spawn_picked_trailer(app.notifier.clone(), game_id, trailer, stream, dir);
+}
+
+/// PC games know their Steam app from the art lookup; other games are searched by title.
+/// Games without music get their main trailer's soundtrack, once (the result is remembered).
+fn queue_trailer_music(app: &mut App) {
+    let art_dir = config::data_dir().join("art");
+    let state = &app.home.state;
+    let jobs: Vec<background::MusicJob> = app
+        .home
+        .games
+        .iter()
+        .filter(|g| g.art.music.is_none() && g.art.snd0.is_none() && g.missing.is_none())
+        .filter(|g| !state.music_lookups.contains_key(&g.id) && !app.music_queued.contains(&g.id))
+        .filter_map(|g| {
+            let dir = art_dir.join(library::safe_file_name(&g.title));
+            if library::art_turned_off(&dir, "music") {
+                return None;
+            }
+            // The Steam app found by the art lookup; a game whose art was complete was never
+            // looked up, so it is searched by title; one Steam doesn't know is skipped.
+            let app = match state.art_lookups.get(&g.id) {
+                Some(Some(app)) => Some(*app),
+                Some(None) => return None,
+                None => None,
+            };
+            Some(background::MusicJob {
+                id: g.id.clone(),
+                title: g.title.clone(),
+                app,
+                dir,
+            })
+        })
+        .collect();
+    if jobs.is_empty() {
+        return;
+    }
+    app.music_queued.extend(jobs.iter().map(|j| j.id.clone()));
+    background::spawn_trailer_music(app.notifier.clone(), jobs);
 }
 
 /// A game's art folder changed: show its new pictures everywhere.
@@ -2474,8 +2618,8 @@ fn sync_art_screen(ui: &AppWindow, app: &mut App) {
     let Some(picker) = &app.art_picker else {
         return;
     };
-    const NAMES: [&str; 3] = ["Cover", "Background", "Logo"];
-    let rows: Vec<ArtRow> = (0..3)
+    const NAMES: [&str; 4] = ["Cover", "Background", "Logo", "Music"];
+    let rows: Vec<ArtRow> = (0..art_picker::SLOTS.len())
         .map(|slot| {
             let choices = &picker.choices[slot];
             let focus = picker.focus[slot].min(choices.len() - 1);
@@ -3872,6 +4016,7 @@ fn reload_library(ui: &AppWindow, app: &mut App) -> Result<Vec<String>, String> 
     update_music(app);
     queue_art_lookups(app);
     queue_ps3_music(app);
+    queue_trailer_music(app);
     Ok(library.warnings)
 }
 

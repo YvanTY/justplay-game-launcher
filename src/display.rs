@@ -101,14 +101,28 @@ pub fn step(current: &ScreenChoice, screens: &[Screen], delta: i32) -> ScreenCho
     list[next].clone()
 }
 
+/// What a choice means with the screens connected now: a chosen screen that isn't connected,
+/// or "All screens" with only one, falls back to the main screen. The choice itself is kept,
+/// so plugging the screen back in brings it back.
+pub fn effective(choice: &ScreenChoice, screens: &[Screen]) -> ScreenChoice {
+    match choice {
+        ScreenChoice::Screen(device) if !screens.iter().any(|s| s.device == *device) => {
+            ScreenChoice::Main
+        }
+        ScreenChoice::Duplicate if screens.len() < 2 => ScreenChoice::Main,
+        other => other.clone(),
+    }
+}
+
 pub fn describe(choice: &ScreenChoice, screens: &[Screen]) -> String {
     match choice {
         ScreenChoice::Main if screens.len() < 2 => "Main screen (only one connected)".into(),
         ScreenChoice::Main => "Main screen".into(),
         ScreenChoice::Screen(device) => screens.iter().find(|s| s.device == *device).map_or_else(
-            || "A screen that isn't connected".into(),
+            || "Main screen (chosen screen not connected)".into(),
             |s| s.name.clone(),
         ),
+        ScreenChoice::Duplicate if screens.len() < 2 => "Main screen (only one connected)".into(),
         ScreenChoice::Duplicate => "All screens (same picture)".into(),
     }
 }
@@ -476,6 +490,36 @@ mod tests {
             primary: "D1".into(),
         };
         assert_eq!(wanted(&ScreenChoice::Main, &cloned, true), cloned);
+    }
+
+    #[test]
+    fn a_screen_that_is_not_connected_means_the_main_screen() {
+        let one = [screen(r"\\.\DISPLAY1", true)];
+        let two = [
+            screen(r"\\.\DISPLAY1", true),
+            screen(r"\\.\DISPLAY4", false),
+        ];
+        let tv = ScreenChoice::Screen(r"\\.\DISPLAY4".into());
+        assert_eq!(effective(&tv, &two), tv);
+        assert_eq!(
+            effective(&tv, &one),
+            ScreenChoice::Main,
+            "the TV is unplugged"
+        );
+        assert_eq!(
+            effective(&ScreenChoice::Duplicate, &one),
+            ScreenChoice::Main
+        );
+        assert_eq!(
+            effective(&ScreenChoice::Duplicate, &two),
+            ScreenChoice::Duplicate
+        );
+        assert_eq!(
+            describe(&tv, &one),
+            "Main screen (chosen screen not connected)"
+        );
+        // Left/Right from there offers only what is connected.
+        assert_eq!(step(&tv, &one, 1), ScreenChoice::Main);
     }
 
     #[test]

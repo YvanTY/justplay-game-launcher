@@ -44,6 +44,9 @@ pub struct State {
     pub renames: BTreeMap<String, String>,
     /// Emulators set up from the launcher (Emulators screen), next to config.toml's.
     pub added_systems: Vec<crate::config::SystemConfig>,
+    /// Game id -> the store trailer its music came from (None: no trailer found). Looked up
+    /// once; the Choose art screen shows the one in use.
+    pub music_lookups: BTreeMap<String, Option<u64>>,
     /// Game id -> Steam app id its art came from (None: no Steam app). Looked up once.
     pub art_lookups: HashMap<String, Option<u32>>,
     /// Version of the art lookup that filled `art_lookups`; a newer lookup retries the misses.

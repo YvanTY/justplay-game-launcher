@@ -1,14 +1,15 @@
-//! The Choose art screen: for one game, every cover, background and logo found (the art in use,
+﻿//! The Choose art screen: for one game, every cover, background and logo found (the art in use,
 //! Steam's images for several store matches, screenshots, the store banner, PCGamingWiki's
-//! cover) in three rows. UI-free so it can be unit-tested; main.rs downloads the choices,
-//! applies the one picked and mirrors this into the window.
+//! cover) and the store trailers whose soundtrack can be its music, in four rows. UI-free so it
+//! can be unit-tested; main.rs downloads the choices, applies the one picked and mirrors this
+//! into the window.
 
 use std::path::PathBuf;
 
 use crate::Action;
 
 /// Art folder file names, one per row.
-pub const SLOTS: [&str; 3] = ["icon", "hero", "logo"];
+pub const SLOTS: [&str; 4] = ["icon", "hero", "logo", "music"];
 
 /// Choices skipped by LT / RT.
 const PAGE: usize = 5;
@@ -46,10 +47,10 @@ pub struct ArtPicker {
     pub title: String,
     /// The game's art folder, where the picked file goes.
     pub art_dir: PathBuf,
-    /// 0 cover, 1 background, 2 logo.
+    /// 0 cover, 1 background, 2 logo, 3 music (a store trailer's soundtrack).
     pub slot: usize,
-    pub choices: [Vec<Choice>; 3],
-    pub focus: [usize; 3],
+    pub choices: [Vec<Choice>; 4],
+    pub focus: [usize; 4],
     /// Choices are still being looked for and downloaded.
     pub searching: bool,
     /// A source couldn't be reached (offline?): RB looks again.
@@ -77,8 +78,9 @@ impl ArtPicker {
                 none("None · show the title on a colored tile"),
                 none("None · plain background"),
                 none("None · show the title as text"),
+                none("None · no music"),
             ],
-            focus: [0; 3],
+            focus: [0; 4],
             searching: true,
             trouble: false,
         }
@@ -146,7 +148,7 @@ impl ArtPicker {
         let focus = &mut self.focus[self.slot];
         match action {
             Action::Up | Action::TabPrev => self.slot = self.slot.saturating_sub(1),
-            Action::Down => self.slot = (self.slot + 1).min(2),
+            Action::Down => self.slot = (self.slot + 1).min(SLOTS.len() - 1),
             Action::TabNext if !self.searching => return Some(Effect::Retry),
             Action::Left => *focus = focus.saturating_sub(1),
             Action::Right => *focus = (*focus + 1).min(last),

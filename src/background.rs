@@ -29,8 +29,8 @@ pub enum Event {
         id: String,
         outcome: ArtOutcome,
     },
-    /// One more picture for the Choose art screen (`slot` 0 cover, 1 background, 2 logo),
-    /// with its thumbnail already decoded.
+    /// One more picture for the Choose art screen (`slot` 0 cover, 1 background, 2 logo,
+    /// 3 a trailer for music), with its thumbnail already decoded.
     ArtChoice {
         game: String,
         slot: usize,
@@ -77,6 +77,108 @@ pub enum Event {
     },
     /// GitHub's latest release, newer or not.
     LatestRelease(Result<crate::update::Update, String>),
+    /// A game's music from its store trailer: saved (`Some(file, trailer)`), no trailer
+    /// found (`None`), or a failure worth trying again another time.
+    TrailerMusic {
+        id: String,
+        result: Result<Option<(PathBuf, u64)>, String>,
+        /// Picked on the Choose art screen (rather than found automatically).
+        picked: bool,
+    },
+}
+
+/// Music from a game's store trailer: (game id, title, Steam app if known, art folder).
+pub struct MusicJob {
+    pub id: String,
+    pub title: String,
+    pub app: Option<u32>,
+    pub dir: PathBuf,
+}
+
+/// Gives games without music the soundtrack of their main store trailer, one at a time (a
+/// trailer's sound takes ~15-30 s to fetch). Stops without ffmpeg or internet.
+pub fn spawn_trailer_music(notifier: Notifier, jobs: Vec<MusicJob>) {
+    let spawned = std::thread::Builder::new()
+        .name("trailer-music".into())
+        .spawn(move || {
+            for job in jobs {
+                let found = (|| -> Result<Option<steam::Trailer>, net::Error> {
+                    let app = match job.app {
+                        Some(app) => Some(app),
+                        None => steam::find(&job.title)?,
+                    };
+                    let Some(app) = app else { return Ok(None) };
+                    Ok(steam::trailers(app)?.into_iter().next())
+                })();
+                let trailer = match found {
+                    Ok(trailer) => trailer,
+                    Err(e) => {
+                        crate::diag::log(&format!("trailer music paused (offline?): {e}"));
+                        return;
+                    }
+                };
+                let Some(trailer) = trailer else {
+                    notifier.send(Event::TrailerMusic {
+                        id: job.id,
+                        result: Ok(None),
+                        picked: false,
+                    });
+                    continue;
+                };
+                let out = job.dir.join("music.ogg");
+                let result = match library::snd0::trailer_audio(&trailer.stream, &out) {
+                    Ok(()) => Ok(Some((out, trailer.id))),
+                    Err(library::snd0::Failure::NoFfmpeg) => {
+                        crate::diag::log("ffmpeg not found: no trailer music");
+                        return;
+                    }
+                    Err(library::snd0::Failure::Other(e)) => Err(e),
+                };
+                notifier.send(Event::TrailerMusic {
+                    id: job.id,
+                    result,
+                    picked: false,
+                });
+            }
+        });
+    if let Err(e) = spawned {
+        crate::diag::log(&format!("trailer music could not start: {e}"));
+    }
+}
+
+/// The trailer picked on the Choose art screen, saved as the game's music.
+pub fn spawn_picked_trailer(
+    notifier: Notifier,
+    id: String,
+    trailer: u64,
+    stream: String,
+    dir: PathBuf,
+) {
+    let spawned = std::thread::Builder::new()
+        .name("picked-trailer".into())
+        .spawn(move || {
+            let out = dir.join("music.ogg.new");
+            let result = match library::snd0::trailer_audio(&stream, &out) {
+                Ok(()) => {
+                    let music = dir.join("music.ogg");
+                    std::fs::rename(&out, &music)
+                        .map(|()| Some((music, trailer)))
+                        .map_err(|e| e.to_string())
+                }
+                Err(library::snd0::Failure::NoFfmpeg) => Err(
+                    "ffmpeg isn't installed: it's needed to take the music from a trailer".into(),
+                ),
+                Err(library::snd0::Failure::Other(e)) => Err(e),
+            };
+            notifier.send(Event::TrailerMusic {
+                id,
+                result,
+                picked: true,
+            });
+        });
+    if let Err(e) = spawned {
+        crate::diag::log(&format!("trailer music could not start: {e}"));
+    }
 }
 
 pub enum ArtOutcome {
@@ -317,6 +419,8 @@ pub struct ChoicesJob {
     pub sgdb_key: Option<String>,
     /// The folder the game's exe is in: repacks often ship a cover there.
     pub game_dir: Option<PathBuf>,
+    /// The store trailer the game's music came from, shown as in use.
+    pub music_in_use: Option<u64>,
 }
 
 /// Gathers every picture worth offering on the Choose art screen.
@@ -615,6 +719,20 @@ fn choices_from_app(
             offer(notifier, job, 1, path, label, false, Some(shot.full));
         }
     }
+    // Music: the trailers, shown by their thumbnails; `full` is "<trailer id> <stream>".
+    for (i, trailer) in steam::trailers(app)?.into_iter().take(4).enumerate() {
+        if let Some(path) = fetch(
+            job,
+            cancel,
+            &trailer.thumbnail,
+            &format!("{app}-trailer{i}"),
+        )? {
+            let label = format!("{} · {name}", trailer.name);
+            let in_use = job.music_in_use == Some(trailer.id);
+            let full = Some(format!("{} {}", trailer.id, trailer.stream));
+            offer(notifier, job, 3, path, label, in_use, full);
+        }
+    }
     Ok(())
 }
 
@@ -798,6 +916,7 @@ mod tests {
             scale: 1.0,
             sgdb_key: None,
             game_dir: None,
+            music_in_use: None,
         };
         let started = std::time::Instant::now();
         let cancel = AtomicBool::new(false);

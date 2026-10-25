@@ -244,9 +244,36 @@ pub fn apply_art_folder(game: &mut Game, art_dir: &Path) {
         }
     }
     game.art.hero_off = art_turned_off(&dir, "hero");
-    if let Some(music) = crate::music::find_music(&dir) {
+    if art_turned_off(&dir, "music") {
+        // "None" chosen for music: not even a PS3 game's own tune.
+        game.art.music = None;
+        game.art.snd0 = None;
+    } else if let Some(music) = crate::music::find_music(&dir) {
         game.art.music = Some(music);
     }
+}
+
+/// Makes trailer music (already saved as `music.ogg` in `dir`) the game's music, or turns music
+/// off with None: other music files move to `_previous`, so nothing is lost and none shadows it.
+pub fn set_music(dir: &Path, trailer: bool) -> Result<(), String> {
+    let fail = |e: std::io::Error| format!("Could not change the music in {}: {e}", dir.display());
+    std::fs::create_dir_all(dir).map_err(fail)?;
+    let marker = dir.join("music.none");
+    for extension in ["mp3", "ogg", "flac", "wav"] {
+        let file = dir.join(format!("music.{extension}"));
+        if !file.is_file() || (trailer && extension == "ogg") {
+            continue;
+        }
+        let previous = dir.join("_previous");
+        std::fs::create_dir_all(&previous).map_err(fail)?;
+        std::fs::rename(&file, previous.join(format!("music.{extension}"))).map_err(fail)?;
+    }
+    if trailer {
+        let _ = std::fs::remove_file(&marker);
+    } else {
+        std::fs::write(&marker, b"").map_err(fail)?;
+    }
+    Ok(())
 }
 
 /// The user chose "None" for this slot: automatic art must not fill it again.

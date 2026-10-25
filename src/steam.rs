@@ -1,6 +1,7 @@
 //! Game art from Steam's public store data (no account, no key): find the game by title, then
 //! download its library images from the store's image server.
 
+use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
 
@@ -293,6 +294,80 @@ pub fn screenshots(app: u32) -> Result<Vec<Shot>, net::Error> {
         .unwrap_or_default())
 }
 
+/// A store trailer: where to stream it from (its soundtrack becomes the game's music).
+#[derive(Clone, Debug, PartialEq)]
+pub struct Trailer {
+    pub id: u64,
+    pub name: String,
+    pub thumbnail: String,
+    pub stream: String,
+}
+
+/// The game's trailers, the highlighted ones first.
+pub fn trailers(app: u32) -> Result<Vec<Trailer>, net::Error> {
+    let body = net::get(&format!(
+        "https://store.steampowered.com/api/appdetails?filters=movies&appids={app}"
+    ))?;
+    Ok(parse_trailers(&body))
+}
+
+fn parse_trailers(body: &[u8]) -> Vec<Trailer> {
+    #[derive(Deserialize)]
+    struct Details {
+        #[serde(default)]
+        success: bool,
+        data: Option<Data>,
+    }
+    #[derive(Deserialize)]
+    struct Data {
+        #[serde(default)]
+        movies: Vec<Movie>,
+    }
+    #[derive(Deserialize)]
+    struct Movie {
+        id: u64,
+        #[serde(default)]
+        name: String,
+        #[serde(default)]
+        thumbnail: String,
+        #[serde(default)]
+        highlight: bool,
+        /// Streamed trailers (Steam's current format).
+        hls_h264: Option<String>,
+        /// Older pages still list plain video files.
+        mp4: Option<HashMap<String, String>>,
+        webm: Option<HashMap<String, String>>,
+    }
+    let details: HashMap<String, Details> = serde_json::from_slice(body).unwrap_or_default();
+    let mut movies: Vec<Movie> = details
+        .into_values()
+        .find(|d| d.success)
+        .and_then(|d| d.data)
+        .map(|d| d.movies)
+        .unwrap_or_default();
+    // Stable: the store's order within highlighted and other trailers.
+    movies.sort_by_key(|m| !m.highlight);
+    movies
+        .into_iter()
+        .filter_map(|m| {
+            let plain = |files: Option<HashMap<String, String>>| {
+                let files = files?;
+                files.get("480").or_else(|| files.get("max")).cloned()
+            };
+            let stream = m
+                .hls_h264
+                .or_else(|| plain(m.mp4))
+                .or_else(|| plain(m.webm))?;
+            Some(Trailer {
+                id: m.id,
+                name: m.name,
+                thumbnail: m.thumbnail,
+                stream,
+            })
+        })
+        .collect()
+}
+
 /// The small store banner, kept for games Steam has no cover for.
 pub fn download_banner(app: u32, dir: &Path) -> Result<bool, net::Error> {
     save(&banner_url(app), dir, "icon")
@@ -332,6 +407,26 @@ pub fn save(url: &str, dir: &Path, name: &str) -> Result<bool, net::Error> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn trailers_come_streamed_or_as_plain_files_highlights_first() {
+        let body = br#"{"1593500":{"success":true,"data":{"movies":[
+            {"id":2,"name":"Old Trailer","thumbnail":"t2.jpg","highlight":false,
+             "mp4":{"480":"https://x/480.mp4","max":"https://x/max.mp4"}},
+            {"id":1,"name":"Features Trailer","thumbnail":"t1.jpg","highlight":true,
+             "hls_h264":"https://x/master.m3u8"},
+            {"id":3,"name":"No video","thumbnail":"t3.jpg","highlight":true}
+        ]}}}"#;
+        let trailers = parse_trailers(body);
+        assert_eq!(trailers.len(), 2, "a movie without any video is skipped");
+        assert_eq!(trailers[0].name, "Features Trailer");
+        assert_eq!(trailers[0].stream, "https://x/master.m3u8");
+        assert_eq!(
+            trailers[1].stream, "https://x/480.mp4",
+            "the light file is enough for sound"
+        );
+        assert!(parse_trailers(b"{\"1\":{\"success\":false}}").is_empty());
+    }
 
     fn best(title: &str, names: &[&str]) -> Option<usize> {
         best_title(title, names.iter().copied())
