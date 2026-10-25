@@ -30,6 +30,8 @@ pub enum SheetItem {
     ToggleFavorite,
     /// Choose the cover, background and logo among everything found.
     ChangeArt,
+    /// Type a new name with the on-screen keyboard.
+    Rename,
     /// Only for games added from the launcher; their files are never touched.
     Remove,
 }
@@ -60,6 +62,8 @@ pub enum Effect {
     Remove(usize),
     /// Open the Choose art screen for this game.
     ChangeArt(usize),
+    /// Open the on-screen keyboard to rename this game.
+    Rename(usize),
 }
 
 /// Everything a key press can change, compared before/after to pick a feedback sound.
@@ -147,6 +151,7 @@ impl Home {
         // After the everyday items, so they keep their positions whatever the game.
         items.push(SheetItem::ControllerMode);
         items.push(SheetItem::ChangeArt);
+        items.push(SheetItem::Rename);
         if self.games[game].removable && Some(game) != self.running {
             items.push(SheetItem::Remove);
         }
@@ -390,6 +395,7 @@ impl Home {
                     SheetItem::ControllerMode => unreachable!("handled above"),
                     SheetItem::Remove => vec![Effect::Remove(game)],
                     SheetItem::ChangeArt => vec![Effect::ChangeArt(game)],
+                    SheetItem::Rename => vec![Effect::Rename(game)],
                     SheetItem::ToggleFavorite => {
                         let id = self.games[game].id.clone();
                         self.state.toggle_favorite(&id);
@@ -535,6 +541,7 @@ mod tests {
             requires: vec![],
             missing: None,
             removable: false,
+            original_title: None,
         }
     }
 
@@ -636,7 +643,8 @@ mod tests {
                 SheetItem::CloseGame,
                 SheetItem::ToggleFavorite,
                 SheetItem::ControllerMode,
-                SheetItem::ChangeArt
+                SheetItem::ChangeArt,
+                SheetItem::Rename
             ]
         );
         home.handle(Action::Down);
@@ -701,7 +709,8 @@ mod tests {
                 SheetItem::Play,
                 SheetItem::ToggleFavorite,
                 SheetItem::ControllerMode,
-                SheetItem::ChangeArt
+                SheetItem::ChangeArt,
+                SheetItem::Rename
             ]
         );
         home.handle(Action::Down);

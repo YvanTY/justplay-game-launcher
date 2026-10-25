@@ -12,6 +12,7 @@ mod display;
 mod emulation;
 mod home;
 mod input;
+mod keyboard;
 mod launcher;
 mod library;
 mod menus;
@@ -166,6 +167,8 @@ struct App {
     sound_pids: HashMap<u32, Option<u32>>,
     /// PS3 games whose menu music was queued for conversion this session (tried once each).
     ps3_music_queued: HashSet<String>,
+    /// The game being renamed (by id) and the on-screen keyboard typing its name.
+    renaming: Option<(String, keyboard::Keyboard)>,
 }
 
 fn main() -> Result<(), slint::PlatformError> {
@@ -199,7 +202,7 @@ fn main() -> Result<(), slint::PlatformError> {
                 .steamgriddb_key
                 .clone()
                 .filter(|k| !k.trim().is_empty());
-            library::load(&config, &state.added_games, &data_dir)
+            library::load(&config, &state.added_games, &state.renames, &data_dir)
         }
         Err(e) => {
             problems.push(e);
@@ -289,6 +292,7 @@ fn main() -> Result<(), slint::PlatformError> {
         sound_target: None,
         sound_pids: HashMap::new(),
         ps3_music_queued: HashSet::new(),
+        renaming: None,
     }));
 
     {
@@ -350,6 +354,15 @@ fn main() -> Result<(), slint::PlatformError> {
         let weak = ui.as_weak();
         let app = app.clone();
         move || hold_tick(&weak.unwrap(), &mut app.borrow_mut())
+    });
+    ui.on_typed({
+        let weak = ui.as_weak();
+        let app = app.clone();
+        move |text| {
+            let mut app = app.borrow_mut();
+            let outcome = keyboard_input(&mut app, |k| k.type_text(&text));
+            finish_keyboard(&weak.unwrap(), &mut app, outcome);
+        }
     });
     ui.on_game_screen_check({
         let app = app.clone();
@@ -499,6 +512,12 @@ fn handle_action(ui: &AppWindow, app: &Rc<RefCell<App>>, action: Action) {
     }
     // A pad or keyboard press in between means the next click starts over.
     app.borrow_mut().last_click = None;
+    if app.borrow().renaming.is_some() {
+        let mut app = app.borrow_mut();
+        let outcome = keyboard_input(&mut app, |k| k.handle(action));
+        finish_keyboard(ui, &mut app, outcome);
+        return;
+    }
     if action == Action::Menu || app.borrow().menus.is_open() {
         handle_menu_action(ui, &mut app.borrow_mut(), action);
         return;
@@ -691,6 +710,16 @@ fn click(ui: &AppWindow, app: &mut App, target: Target, a: usize, b: usize, step
             remap_command(ui, app, a);
             Then::Nothing
         }
+        // --- Rename keyboard ---
+        Target::KeyboardKey => {
+            let key = keyboard::caps().get(a).map(|cap| cap.key);
+            if let (Some(key), Some((_, keyboard))) = (key, app.renaming.as_mut()) {
+                keyboard.focus = a;
+                let outcome = keyboard_input(app, |k| k.press(key));
+                finish_keyboard(ui, app, outcome);
+            }
+            Then::Nothing
+        }
         Target::HoldExit => {
             leave_controllers_screen(ui, app);
             Then::Nothing
@@ -737,6 +766,11 @@ fn click(ui: &AppWindow, app: &mut App, target: Target, a: usize, b: usize, step
 /// brush); a click is deliberate, so it leaves at once.
 fn mouse_back(ui: &AppWindow, app_rc: &Rc<RefCell<App>>) {
     if input_paused(&app_rc.borrow()) {
+        return;
+    }
+    if app_rc.borrow().renaming.is_some() {
+        let mut app = app_rc.borrow_mut();
+        finish_keyboard(ui, &mut app, Some(keyboard::Outcome::Cancel));
         return;
     }
     if app_rc.borrow().menus.overlay == Overlay::Controllers {
@@ -834,6 +868,12 @@ fn apply_effects(ui: &AppWindow, app_rc: &Rc<RefCell<App>>, effects: &[Effect]) 
             }
             Effect::Remove(game) => remove_game(ui, &mut app, *game),
             Effect::ChangeArt(game) => open_art_picker(ui, &mut app, *game),
+            Effect::Rename(game) => {
+                let game = &app.home.games[*game];
+                app.renaming = Some((game.id.clone(), keyboard::Keyboard::new(&game.title)));
+                app.home.sheet = None;
+                sync_keyboard(ui, &app);
+            }
             Effect::Unavailable(game) => {
                 // The drive may have been plugged in since the last check.
                 let missing = {
@@ -988,6 +1028,7 @@ fn push_scalars(ui: &AppWindow, home: &Home) {
                 SheetItem::ToggleFavorite => "Add to Favorites".into(),
                 SheetItem::Remove => "Remove from library".into(),
                 SheetItem::ChangeArt => "Change art".into(),
+                SheetItem::Rename => "Rename".into(),
             })
             .collect();
         ui.set_sheet_items(ModelRc::new(VecModel::from(items)));
@@ -1208,6 +1249,120 @@ fn hero_loaded(ui: &AppWindow, app: &mut App, path: PathBuf, pixels: Option<scal
         None if wanted => ui.set_has_hero(false),
         None => {}
     }
+}
+
+/// Runs one input on the rename keyboard (with a click sound when something changed) and
+/// returns its outcome when it closes.
+fn keyboard_input(
+    app: &mut App,
+    input: impl FnOnce(&mut keyboard::Keyboard) -> (bool, Option<keyboard::Outcome>),
+) -> Option<keyboard::Outcome> {
+    let (changed, outcome) = input(&mut app.renaming.as_mut()?.1);
+    if changed {
+        play_sound(app, Sound::Move);
+    }
+    outcome
+}
+
+/// After a keyboard input: redraw it, or apply the new name (or nothing) when it closed.
+fn finish_keyboard(ui: &AppWindow, app: &mut App, outcome: Option<keyboard::Outcome>) {
+    match outcome {
+        None => sync_keyboard(ui, app),
+        Some(keyboard::Outcome::Cancel) => {
+            app.renaming = None;
+            play_sound(app, Sound::Back);
+            sync_keyboard(ui, app);
+        }
+        Some(keyboard::Outcome::Done(text)) => {
+            let id = app.renaming.take().map(|(id, _)| id);
+            sync_keyboard(ui, app);
+            if let Some(id) = id {
+                rename_game(ui, app, &id, text);
+            }
+        }
+    }
+}
+
+/// Gives a game a new name (an empty one puts the original back). Its art folder follows the
+/// name, so its art and music stay with it.
+fn rename_game(ui: &AppWindow, app: &mut App, id: &str, text: String) {
+    let Some(game) = app.home.games.iter().find(|g| g.id == id) else {
+        return;
+    };
+    let current = game.title.clone();
+    let original = game
+        .original_title
+        .clone()
+        .unwrap_or_else(|| current.clone());
+    let wanted = if text.is_empty() {
+        original.clone()
+    } else {
+        text
+    };
+    if wanted == current {
+        play_sound(app, Sound::Back);
+        return;
+    }
+    let state = &mut app.home.state;
+    if wanted == original {
+        state.renames.remove(id);
+    } else {
+        state.renames.insert(id.to_string(), wanted.clone());
+    }
+    let art_dir = config::data_dir().join("art");
+    let from = art_dir.join(library::safe_file_name(&current));
+    let to = art_dir.join(library::safe_file_name(&wanted));
+    if from.is_dir()
+        && !to.exists()
+        && let Err(e) = std::fs::rename(&from, &to)
+    {
+        diag::log(&format!("art folder for {wanted} not moved: {e}"));
+    }
+    if let Err(e) = state.save(&app.state_path) {
+        app.toasts.show(ui, e);
+        return;
+    }
+    play_sound(app, Sound::Confirm);
+    if let Err(e) = reload_library(ui, app) {
+        app.toasts.show(ui, e);
+        return;
+    }
+    let message = if wanted == original {
+        format!("{wanted}: original name back")
+    } else {
+        format!("Renamed to {wanted}")
+    };
+    app.toasts.show(ui, message);
+}
+
+/// Pushes the rename keyboard to the screen (or hides it).
+fn sync_keyboard(ui: &AppWindow, app: &App) {
+    let Some((id, keyboard)) = &app.renaming else {
+        ui.set_keyboard_open(false);
+        return;
+    };
+    let title = app
+        .home
+        .games
+        .iter()
+        .find(|g| g.id == *id)
+        .map(|g| g.original_title.clone().unwrap_or_else(|| g.title.clone()))
+        .unwrap_or_default();
+    let caps: Vec<KeyCap> = keyboard::caps()
+        .iter()
+        .map(|cap| KeyCap {
+            label: cap.key.label(keyboard.shift).into(),
+            row: cap.row as i32,
+            col: cap.col as i32,
+            width: cap.width as i32,
+            lit: cap.key == keyboard::Key::Shift && keyboard.shift,
+        })
+        .collect();
+    ui.set_keyboard_open(true);
+    ui.set_keyboard_title(format!("Rename {title}").into());
+    ui.set_keyboard_text(keyboard.text.as_str().into());
+    ui.set_keyboard_caps(ModelRc::new(VecModel::from(caps)));
+    ui.set_keyboard_focus(keyboard.focus as i32);
 }
 
 /// A newer release found by the update check, unless this version has caught up since.
@@ -3440,7 +3595,8 @@ fn reload_library(ui: &AppWindow, app: &mut App) -> Result<Vec<String>, String> 
         .steamgriddb_key
         .clone()
         .filter(|k| !k.trim().is_empty());
-    let library = library::load(&config, &app.home.state.added_games, &data_dir);
+    let state = &app.home.state;
+    let library = library::load(&config, &state.added_games, &state.renames, &data_dir);
     for warning in &library.warnings {
         diag::log(warning);
     }

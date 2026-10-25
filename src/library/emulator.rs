@@ -81,6 +81,7 @@ pub fn scan(system: &SystemConfig, cache: &Cache, warnings: &mut Vec<String>) ->
             requires: vec![system.emulator.clone(), rom.clone()],
             missing: None,
             removable: false,
+            original_title: None,
         });
     }
     games

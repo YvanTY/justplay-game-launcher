@@ -59,6 +59,8 @@ pub struct Game {
     pub missing: Option<Missing>,
     /// Added from the launcher (not config.toml), so it can be removed from the launcher.
     pub removable: bool,
+    /// The name it had before the user renamed it (None: not renamed).
+    pub original_title: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -119,9 +121,15 @@ pub struct Library {
     pub drive_labels: BTreeMap<String, String>,
 }
 
-/// `added` are the games added from the launcher (kept in state.json). `data_dir` holds the art
-/// folder and the scanner cache.
-pub fn load(config: &Config, added: &[PcGame], data_dir: &Path) -> Library {
+/// `added` are the games added from the launcher and `renames` the names the user gave games
+/// (game id -> title), both kept in state.json. `data_dir` holds the art folder and the
+/// scanner cache.
+pub fn load(
+    config: &Config,
+    added: &[PcGame],
+    renames: &BTreeMap<String, String>,
+    data_dir: &Path,
+) -> Library {
     let cache_path = data_dir.join("games-cache.json");
     let mut cache = Cache::load(&cache_path);
     // Network and optical drives are left out: asking an offline share can stall for seconds.
@@ -161,6 +169,12 @@ pub fn load(config: &Config, added: &[PcGame], data_dir: &Path) -> Library {
         crate::diag::log(&e);
     }
     games.extend(scanned);
+    // Renamed before the art is looked up: the art folder carries the name the user sees.
+    for game in &mut games {
+        if let Some(title) = renames.get(&game.id).filter(|t| **t != game.title) {
+            game.original_title = Some(std::mem::replace(&mut game.title, title.clone()));
+        }
+    }
     let art_dir = data_dir.join("art");
     for game in &mut games {
         apply_art_folder(game, &art_dir);
@@ -207,6 +221,7 @@ fn pc_game(entry: &PcGame, removable: bool, warnings: &mut Vec<String>) -> Optio
         requires: vec![entry.exe.clone()],
         missing: None,
         removable,
+        original_title: None,
     })
 }
 
@@ -408,7 +423,7 @@ mod tests {
             exe.display()
         ))
         .unwrap();
-        let library = load(&config, &[], &data);
+        let library = load(&config, &[], &BTreeMap::new(), &data);
         assert_eq!(library.games.len(), 1);
         assert_eq!(library.games[0].missing, Some(Missing::Files(exe)));
         assert!(library.warnings[0].contains("Ghost"));
@@ -491,6 +506,7 @@ mod tests {
             requires: vec![],
             missing: None,
             removable: false,
+            original_title: None,
         };
         apply_art_folder(&mut game, &data.join("art"));
         assert_eq!(game.art.icon, None, "None wins over the scanner's icon");
@@ -510,10 +526,25 @@ mod tests {
             logo: None,
             xinput: true,
         };
-        let library = load(&config, &[added], &data);
+        let library = load(
+            &config,
+            std::slice::from_ref(&added),
+            &BTreeMap::new(),
+            &data,
+        );
         assert_eq!(library.games.len(), 1);
         assert!(library.games[0].removable);
         assert_eq!(library.games[0].missing, None);
+        // Renamed: the new name is shown and its art folder used; the original is kept.
+        let art = data.join("art").join("My Game");
+        std::fs::create_dir_all(&art).unwrap();
+        std::fs::write(art.join("icon.png"), b"png").unwrap();
+        let renames = BTreeMap::from([("pc:Added".to_string(), "My Game".to_string())]);
+        let library = load(&config, &[added], &renames, &data);
+        let game = &library.games[0];
+        assert_eq!(game.title, "My Game");
+        assert_eq!(game.original_title.as_deref(), Some("Added"));
+        assert_eq!(game.art.icon, Some(art.join("icon.png")));
         let _ = std::fs::remove_dir_all(&data);
     }
 }

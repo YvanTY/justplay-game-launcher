@@ -122,6 +122,7 @@ fn offline_game(config: &Rpcs3Config, serial: &str, path: &Path) -> Option<Game>
         requires: vec![config.exe.clone(), path.to_path_buf()],
         missing: None,
         removable: false,
+        original_title: None,
     })
 }
 
@@ -175,6 +176,7 @@ fn push_game(
         requires: vec![config.exe.clone(), boot_path.to_path_buf()],
         missing: None,
         removable: false,
+        original_title: None,
     });
 }
 

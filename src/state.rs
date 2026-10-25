@@ -1,6 +1,6 @@
 //! Things the launcher remembers between runs: favorites and when each game was last played.
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -40,6 +40,8 @@ pub struct State {
     /// found, offered in Settings until this version catches up.
     pub update_checked: u64,
     pub update: Option<crate::update::Update>,
+    /// Names the user gave games (game id -> title), applied over the scanned names.
+    pub renames: BTreeMap<String, String>,
     /// Game id -> Steam app id its art came from (None: no Steam app). Looked up once.
     pub art_lookups: HashMap<String, Option<u32>>,
     /// Version of the art lookup that filled `art_lookups`; a newer lookup retries the misses.

@@ -114,6 +114,7 @@ impl CachedGame {
             requires: self.requires.clone(),
             missing: None,
             removable: false,
+            original_title: None,
         }
     }
 }
@@ -156,6 +157,7 @@ mod tests {
             requires: vec![PathBuf::from(r"E:\rpcs3\rpcs3.exe")],
             missing: None,
             removable: false,
+            original_title: None,
         }
     }
 

@@ -5,7 +5,7 @@ export enum Action { up, down, left, right, confirm, back, options, tab-prev, ta
 export enum Zone { tabs, icons, actions, recent }
 
 // What a mouse click landed on; main.rs turns it into the same steps a controller would take.
-export enum Target { none, tab, gear, tile, play, more, recent, sheet-item, sheet-outside, dismiss, panel-tile, power-item, settings-row, settings-step, remap-row, hold-exit, add-row, art-thumb, remap-button, controller-mode, remap-command }
+export enum Target { none, tab, gear, tile, play, more, recent, sheet-item, sheet-outside, dismiss, panel-tile, power-item, settings-row, settings-step, remap-row, hold-exit, add-row, art-thumb, remap-button, controller-mode, remap-command, keyboard-key }
 
 // Mouse input for the whole window. The pointer only shows while the mouse is being used.
 export global Mouse {
@@ -89,6 +89,16 @@ component PanelTile inherits Rectangle {
             horizontal-alignment: center;
         }
     }
+}
+
+// A key of the on-screen keyboard: its place in a 10-column grid.
+export struct KeyCap {
+    label: string,
+    row: int,
+    col: int,
+    width: int,
+    // Shift while it is on.
+    lit: bool,
 }
 
 export struct RemapRow {
@@ -661,6 +671,14 @@ export component AppWindow inherits Window {
     // Bottom of Settings: "JustPlay 0.2.0", or a newer version to download.
     in property <string> version-text;
     in property <bool> update-ready;
+    // The on-screen keyboard (renaming a game).
+    in property <bool> keyboard-open;
+    in property <string> keyboard-title;
+    in property <string> keyboard-text;
+    in property <[KeyCap]> keyboard-caps;
+    in property <int> keyboard-focus;
+    // Typed on a physical keyboard while the on-screen one is open.
+    callback typed(string);
     // The button lit on the picture and its row: the focused one (Focus mode) or the one being
     // remapped; -1 for none (Test mode).
     in property <int> remap-highlight: -1;
@@ -2081,6 +2099,92 @@ export component AppWindow inherits Window {
         }
     }
 
+    // --- On-screen keyboard (rename a game) ---
+    if keyboard-open: Rectangle {
+        property <length> key-w: 104 * u;
+        property <length> key-h: 80 * u;
+        property <length> gap: 10 * u;
+        background: #000000c8;
+        Hit { }
+
+        Rectangle {
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
+            width: 10 * key-w + 9 * gap + 80 * u;
+            height: 780 * u;
+            border-radius: 24 * u;
+            background: #0f1522f7;
+            border-width: 1px;
+            border-color: #ffffff1a;
+
+            Text {
+                x: 40 * u;
+                y: 34 * u;
+                text: keyboard-title;
+                font-size: 24 * u;
+                color: #ffffff99;
+            }
+
+            // The name being typed, with a caret at the end.
+            Rectangle {
+                x: 40 * u;
+                y: 80 * u;
+                width: parent.width - 80 * u;
+                height: 84 * u;
+                border-radius: 14 * u;
+                background: #ffffff10;
+                border-width: 2px;
+                border-color: #2d8cff;
+                Text {
+                    x: 24 * u;
+                    width: parent.width - 48 * u;
+                    height: parent.height;
+                    text: keyboard-text + "|";
+                    font-size: 40 * u;
+                    color: white;
+                    vertical-alignment: center;
+                    overflow: elide;
+                }
+            }
+
+            for cap[i] in keyboard-caps: Rectangle {
+                property <bool> focused: i == keyboard-focus;
+                x: 40 * u + cap.col * (key-w + gap);
+                y: 196 * u + cap.row * (key-h + gap);
+                width: cap.width * key-w + (cap.width - 1) * gap;
+                height: key-h;
+                border-radius: 12 * u;
+                background: focused ? #2d8cff : cap.lit ? #2d8cff59 : key-hit.has-hover && Mouse.visible ? #ffffff2e : #ffffff14;
+                drop-shadow-blur: focused ? 20 * u : 0;
+                drop-shadow-color: #2d8cff80;
+                animate background { duration: 80ms; }
+                Text {
+                    width: parent.width;
+                    height: parent.height;
+                    text: cap.label;
+                    font-size: cap.width > 1 ? 24 * u : 32 * u;
+                    font-weight: focused ? 600 : 400;
+                    color: white;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                }
+
+                key-hit := Hit {
+                    target: Target.keyboard-key;
+                    a: i;
+                }
+            }
+
+            Text {
+                x: 40 * u;
+                y: parent.height - 64 * u;
+                text: "A type  ·  B delete  ·  Y shift  ·  RB space  ·  Start done  ·  Done on an empty name restores the original";
+                font-size: 20 * u;
+                color: #ffffff80;
+            }
+        }
+    }
+
     keys := FocusScope {
         key-released(event) => {
             if (event.text == Key.Escape || event.text == Key.Backspace) {
@@ -2090,6 +2194,19 @@ export component AppWindow inherits Window {
             return reject;
         }
         key-pressed(event) => {
+            // While the on-screen keyboard is open, typing goes into the name; arrows still move.
+            if (keyboard-open && event.text != Key.UpArrow && event.text != Key.DownArrow && event.text != Key.LeftArrow && event.text != Key.RightArrow) {
+                if (event.text == Key.Return) {
+                    root.typed("\n");
+                } else if (event.text == Key.Escape) {
+                    root.typed("\u{1b}");
+                } else if (event.text == Key.Backspace) {
+                    root.typed("\u{8}");
+                } else {
+                    root.typed(event.text);
+                }
+                return accept;
+            }
             if (event.text == Key.UpArrow) {
                 root.action(Action.up);
                 return accept;
