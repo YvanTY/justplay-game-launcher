@@ -487,6 +487,11 @@ fn handle_action(ui: &AppWindow, app: &Rc<RefCell<App>>, action: Action) {
         handle_menu_action(ui, &mut app.borrow_mut(), action);
         return;
     }
+    // The welcome screen's one button: find games.
+    if action == Action::Confirm && app.borrow().home.games.is_empty() {
+        open_add_games(ui, &mut app.borrow_mut());
+        return;
+    }
     let before = app.borrow().home.nav_state();
     let effects = app.borrow_mut().home.handle(action);
     let after = app.borrow().home.nav_state();
@@ -938,6 +943,7 @@ fn push_selection(ui: &AppWindow, app: &mut App) {
 
 /// Cheap per-keypress values: focus positions, zone and the game sheet.
 fn push_scalars(ui: &AppWindow, home: &Home) {
+    ui.set_library_empty(home.games.is_empty());
     ui.set_zone(home.zone);
     ui.set_gear_focused(home.gear && home.zone == Zone::Tabs);
     ui.set_selected(home.tab().focus as i32);
@@ -1948,14 +1954,7 @@ fn handle_menu_action(ui: &AppWindow, app: &mut App, action: Action) {
     for effect in effects {
         match effect {
             MenuEffect::Rescan => rescan(ui, app),
-            MenuEffect::FindGames => {
-                // Where the last scan looked, if that folder is still there.
-                let place = match &app.home.state.scan_place {
-                    Some(folder) if folder.is_dir() => add_games::Place::Folder(folder.clone()),
-                    _ => add_games::Place::AllDrives,
-                };
-                start_find_games(app, place);
-            }
+            MenuEffect::FindGames => find_games_where_last_looked(app),
             MenuEffect::Exit => {
                 let _ = slint::quit_event_loop();
             }
@@ -2201,6 +2200,24 @@ fn sync_art_screen(ui: &AppWindow, app: &mut App) {
     );
     ui.set_art_slot(picker.slot as i32);
     ui.set_art_rows(ModelRc::new(VecModel::from(rows)));
+}
+
+/// Opens Add games and starts looking, as the quick panel's Add games does.
+fn open_add_games(ui: &AppWindow, app: &mut App) {
+    app.menus.overlay = Overlay::AddGames;
+    play_sound(app, Sound::Confirm);
+    find_games_where_last_looked(app);
+    push_menus(ui, app);
+    sync_add_games_screen(ui, app);
+}
+
+/// Looks for games where the last scan looked, if that folder is still there, else everywhere.
+fn find_games_where_last_looked(app: &mut App) {
+    let place = match &app.home.state.scan_place {
+        Some(folder) if folder.is_dir() => add_games::Place::Folder(folder.clone()),
+        _ => add_games::Place::AllDrives,
+    };
+    start_find_games(app, place);
 }
 
 /// Starts looking for games in `place`: every fixed and removable drive, or one drive or folder.

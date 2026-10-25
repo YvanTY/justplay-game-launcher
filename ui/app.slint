@@ -654,6 +654,8 @@ export component AppWindow inherits Window {
     in property <bool> capturing;
     in property <string> capture-text;
     in property <bool> capture-can-clear;
+    // No games at all yet (first start): Home shows the welcome screen.
+    in property <bool> library-empty;
     // The button lit on the picture and its row: the focused one (Focus mode) or the one being
     // remapped; -1 for none (Test mode).
     in property <int> remap-highlight: -1;
@@ -852,13 +854,86 @@ export component AppWindow inherits Window {
         overflow: elide;
     }
 
-    if icons.length == 0: Text {
+    if icons.length == 0 && !library-empty: Text {
         x: margin;
         y: row-y + 40 * u;
         text: "No games here yet";
         font-size: 30 * u;
         font-weight: 300;
         color: #ffffffb3;
+    }
+
+    // First start: one clear next step instead of an empty screen. A (or a click) finds games.
+    if library-empty: VerticalLayout {
+        x: margin;
+        y: 280 * u;
+        width: 1100 * u;
+        height: self.preferred-height;
+        alignment: start;
+        spacing: 22 * u;
+        Text {
+            text: "Welcome to JustPlay";
+            font-size: 64 * u;
+            font-weight: 600;
+            color: white;
+        }
+
+        Text {
+            text: "Let's find your games. JustPlay looks through your drives for installed games, and you pick the ones to add.";
+            font-size: 28 * u;
+            font-weight: 300;
+            color: #ffffffcc;
+            wrap: word-wrap;
+        }
+
+        HorizontalLayout {
+            alignment: start;
+            padding-top: 20 * u;
+            Rectangle {
+                height: 76 * u;
+                border-radius: 38 * u;
+                background: welcome-hit.has-hover && Mouse.visible ? #4d9fff : #2d8cff;
+                drop-shadow-blur: 30 * u;
+                drop-shadow-color: #2d8cff80;
+                HorizontalLayout {
+                    padding-left: 30 * u;
+                    padding-right: 40 * u;
+                    spacing: 16 * u;
+                    VerticalLayout {
+                        alignment: center;
+                        Badge {
+                            label: "A";
+                            u: u;
+                        }
+                    }
+
+                    Text {
+                        text: "Find my games";
+                        font-size: 30 * u;
+                        font-weight: 600;
+                        color: white;
+                        vertical-alignment: center;
+                    }
+                }
+
+                welcome-hit := TouchArea {
+                    mouse-cursor: Mouse.visible ? MouseCursor.pointer : MouseCursor.none;
+                    clicked => {
+                        Mouse.act(Action.confirm);
+                    }
+                    changed mouse-x => {
+                        Mouse.moved();
+                    }
+                }
+            }
+        }
+
+        Text {
+            text: "You can also add a game's folder yourself, or set up emulators and controllers, from the menu (≡).";
+            font-size: 22 * u;
+            color: #ffffff80;
+            wrap: word-wrap;
+        }
     }
 
     // --- Logo (or big title), actions and info ---
@@ -981,17 +1056,17 @@ export component AppWindow inherits Window {
         spacing: 32 * u;
         ButtonHint {
             key: "A";
-            label: zone == Zone.tabs ? (gear-focused ? "Menu" : "Open") : "Play";
+            label: library-empty ? "Find my games" : zone == Zone.tabs ? (gear-focused ? "Menu" : "Open") : "Play";
             u: u;
         }
 
-        ButtonHint {
+        if !library-empty: ButtonHint {
             key: "Y";
             label: "Options";
             u: u;
         }
 
-        ButtonHint {
+        if !library-empty: ButtonHint {
             key: "LT/RT";
             label: "Jump";
             u: u;

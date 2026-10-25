@@ -26,8 +26,9 @@ fn main() {
     }
 }
 
-/// Compiles assets/icon.ico into a Windows resource and links it, so Explorer, the taskbar and
-/// shortcuts show the launcher's icon. A missing resource compiler only costs the icon, not the build.
+/// Compiles assets/icon.ico and the version details into a Windows resource and links it, so
+/// Explorer, the taskbar, shortcuts and Task Manager show the launcher's icon and name. A missing
+/// resource compiler only costs those, not the build.
 fn embed_icon() {
     println!("cargo:rerun-if-changed=assets/icon.ico");
     let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap());
@@ -42,7 +43,40 @@ fn embed_icon() {
     // Resource id 1: Windows uses the first icon group as the exe's icon.
     // rc.exe treats backslashes in strings as escapes, so give it forward slashes.
     let icon_path = icon.display().to_string().replace('\\', "/");
-    fs::write(&script, format!("1 ICON \"{icon_path}\"\n")).unwrap();
+    let version = env::var("CARGO_PKG_VERSION").unwrap();
+    let numbers: Vec<&str> = version.split('.').collect();
+    let comma_version = format!("{},{},{},0", numbers[0], numbers[1], numbers[2]);
+    fs::write(
+        &script,
+        format!(
+            r#"1 ICON "{icon_path}"
+1 VERSIONINFO
+FILEVERSION {comma_version}
+PRODUCTVERSION {comma_version}
+BEGIN
+  BLOCK "StringFileInfo"
+  BEGIN
+    BLOCK "040904b0"
+    BEGIN
+      VALUE "CompanyName", "YvanTY"
+      VALUE "FileDescription", "JustPlay - Game Launcher"
+      VALUE "FileVersion", "{version}"
+      VALUE "LegalCopyright", "MIT License, (c) 2026 YvanTY"
+      VALUE "OriginalFilename", "JustPlay.exe"
+      VALUE "ProductName", "JustPlay - Game Launcher"
+      VALUE "ProductVersion", "{version}"
+    END
+  END
+  BLOCK "VarFileInfo"
+  BEGIN
+    VALUE "Translation", 0x409, 1200
+  END
+END
+"#
+        ),
+    )
+    .unwrap();
+    println!("cargo:rerun-if-changed=Cargo.toml");
     let status = std::process::Command::new(&rc)
         .arg("/nologo")
         .arg("/fo")
