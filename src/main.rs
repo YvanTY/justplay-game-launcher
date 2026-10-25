@@ -27,6 +27,8 @@ mod steam;
 
 use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
+
+use controllers::XButton;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::Arc;
@@ -144,6 +146,12 @@ struct App {
     held_since: HashMap<usize, std::time::Instant>,
     holds_done: HashSet<usize>,
     hold_timer: Timer,
+    /// Controllers screen: how the pad is read, the remap in progress (one button, or all),
+    /// and the last Live masks (pad inputs held, buttons the game sees).
+    controllers_mode: controllers::Mode,
+    remap_run: Option<controllers::RemapRun>,
+    live_raw: u32,
+    live_out: u32,
 }
 
 fn main() -> Result<(), slint::PlatformError> {
@@ -256,6 +264,10 @@ fn main() -> Result<(), slint::PlatformError> {
         held_since: HashMap::new(),
         holds_done: HashSet::new(),
         hold_timer: Timer::default(),
+        controllers_mode: controllers::Mode::Test,
+        remap_run: None,
+        live_raw: 0,
+        live_out: 0,
     }));
 
     {
@@ -390,7 +402,7 @@ fn main() -> Result<(), slint::PlatformError> {
         // and the callback only says "something arrived".
         let event = match event {
             InputEvent::Pads(_)
-            | InputEvent::Live(_)
+            | InputEvent::Live { .. }
             | InputEvent::Captured(_)
             | InputEvent::CaptureTimedOut => {
                 let _ = controller_sender.send(event);
@@ -602,15 +614,39 @@ fn click(ui: &AppWindow, app: &mut App, target: Target, a: usize, b: usize, step
             })
         }
         // --- Controllers screen ---
-        Target::RemapRow if a == app.remap_selected && app.repeated_click => {
-            Then::Action(Action::Confirm)
-        }
+        // A row (the boxes around the picture): add a key or button to it.
         Target::RemapRow => {
-            if a < controllers::ALL.len() && !app.capturing {
+            if a < controllers::ALL.len() && !app.capturing && app.remap_run.is_none() {
                 app.remap_selected = a;
-                moved(app);
+                if let Some(sound) = start_capture(ui, app) {
+                    play_sound(app, sound);
+                }
                 sync_controllers_screen(ui, app);
             }
+            Then::Nothing
+        }
+        // A button on the controller picture: remap it.
+        Target::RemapButton => {
+            if a < controllers::ALL.len() && !app.capturing && app.remap_run.is_none() {
+                app.remap_selected = a;
+                if let Some(sound) = start_remap_selected(ui, app) {
+                    play_sound(app, sound);
+                }
+                sync_controllers_screen(ui, app);
+            }
+            Then::Nothing
+        }
+        Target::ControllerMode => {
+            if let Some(mode) = controllers::Mode::ALL.get(a)
+                && *mode != app.controllers_mode
+            {
+                set_controllers_mode(ui, app, *mode);
+                sync_controllers_screen(ui, app);
+            }
+            Then::Nothing
+        }
+        Target::RemapCommand => {
+            remap_command(ui, app, a);
             Then::Nothing
         }
         Target::HoldExit => {
@@ -662,7 +698,14 @@ fn mouse_back(ui: &AppWindow, app_rc: &Rc<RefCell<App>>) {
         return;
     }
     if app_rc.borrow().menus.overlay == Overlay::Controllers {
-        leave_controllers_screen(ui, &mut app_rc.borrow_mut());
+        let mut app = app_rc.borrow_mut();
+        // A right click first stops a remap or an add in progress.
+        if app.capturing || app.remap_run.is_some() {
+            cancel_remapping(ui, &mut app);
+            sync_controllers_screen(ui, &mut app);
+        } else {
+            leave_controllers_screen(ui, &mut app);
+        }
         return;
     }
     handle_action(ui, app_rc, Action::Back);
@@ -721,6 +764,9 @@ fn leave_controllers_screen(ui: &AppWindow, app: &mut App) {
         return;
     }
     cancel_back_hold(ui, app);
+    // Done so far stays saved; the screen opens in Test mode next time.
+    app.remap_run = None;
+    app.controllers_mode = controllers::Mode::Test;
     app.menus.overlay = Overlay::Panel;
     play_sound(app, Sound::Back);
     push_menus(ui, app);
@@ -1351,6 +1397,10 @@ fn home_combo(ui: &AppWindow, app: &mut App) {
         app.home.running.is_some(),
         app.in_background
     ));
+    // Start + Select is pressed to test the pad there; only holding B leaves that screen.
+    if app.menus.overlay == Overlay::Controllers && !app.in_background {
+        return;
+    }
     let Some(game) = app.home.running else { return };
     if app.in_background {
         app.home.open_close_menu();
@@ -1667,7 +1717,8 @@ impl Toasts {
 
 /// Quick panel, Power and Settings: navigation, then whatever the chosen item does.
 fn handle_menu_action(ui: &AppWindow, app: &mut App, action: Action) {
-    if app.menus.overlay == Overlay::Controllers && action != Action::Menu {
+    // Start too: pressing it to test the pad must not close the Controllers screen.
+    if app.menus.overlay == Overlay::Controllers {
         handle_controllers_action(ui, app, action);
         return;
     }
@@ -2264,44 +2315,45 @@ fn results_status(screen: &add_games::AddGames) -> String {
     }
 }
 
-/// The Controllers screen: move through the button lists, A to add a key/button, Y to clear.
+/// The Controllers screen from the keyboard or a clicked hint. Pad presses arrive as Live masks
+/// instead (see pad_presses), so every pad button can be tested without anything happening.
 fn handle_controllers_action(ui: &AppWindow, app: &mut App, action: Action) {
-    // While waiting, the input thread delivers the next key/button; actions are ignored so the
-    // press that is being captured doesn't also navigate.
-    if app.capturing {
+    if app.pad_input {
         return;
     }
-    // On the pad these buttons work by holding them (see hold_tick): a quick press only lights
-    // the button up, so every button can be tested.
-    if app.pad_input
-        && matches!(
-            action,
-            Action::Confirm | Action::Back | Action::Options | Action::TabPrev | Action::TabNext
-        )
-    {
+    if app.capturing || app.remap_run.is_some() {
+        if action == Action::Back {
+            cancel_remapping(ui, app);
+            sync_controllers_screen(ui, app);
+        }
         return;
     }
-    let before = (app.remap_selected, app.pad_index);
+    let focus = app.controllers_mode == controllers::Mode::Focus;
     let sound = match action {
         Action::Up | Action::Down | Action::Left | Action::Right => {
-            app.remap_selected = controllers::navigate(app.remap_selected, action);
-            Some(if before.0 != app.remap_selected {
-                Sound::Move
-            } else {
-                Sound::Bump
-            })
+            app.controllers_mode = controllers::Mode::Focus;
+            Some(move_focus(app, action))
+        }
+        // Enter and Y act on the focused button, which only Focus mode shows: switch to it first.
+        Action::Confirm | Action::Options if !focus => {
+            app.controllers_mode = controllers::Mode::Focus;
+            Some(Sound::Tab)
         }
         Action::TabPrev | Action::TabNext if app.pads.len() > 1 => {
             let delta = if action == Action::TabNext { 1 } else { -1 };
             app.pad_index = nav::wrap_index(app.pad_index, app.pads.len(), delta);
             Some(Sound::Tab)
         }
-        Action::Confirm => start_capture(ui, app),
+        Action::Confirm => start_remap_selected(ui, app),
         Action::Options => {
             clear_selected(ui, app);
             Some(Sound::Back)
         }
-        // Leaving needs B held for BACK_HOLD, so a stray press doesn't throw away the screen.
+        Action::Menu => {
+            leave_controllers_screen(ui, app);
+            return;
+        }
+        // Leaving needs Esc held for BACK_HOLD, like B on the pad.
         Action::Back if app.back_hold_since.is_none() => {
             app.back_hold_since = Some(std::time::Instant::now());
             let weak = ui.as_weak();
@@ -2324,6 +2376,275 @@ fn handle_controllers_action(ui: &AppWindow, app: &mut App, action: Action) {
 
 /// Holding Esc on the keyboard to leave the Controllers screen (the pad's B uses hold_tick).
 const BACK_HOLD: Duration = Duration::from_secs(2);
+
+fn move_focus(app: &mut App, action: Action) -> Sound {
+    let before = app.remap_selected;
+    app.remap_selected = controllers::navigate(before, action);
+    if before != app.remap_selected {
+        Sound::Move
+    } else {
+        Sound::Bump
+    }
+}
+
+/// Pad buttons that went down (`pressed`) or up (`released`) on the Controllers screen.
+/// Remapping records them; Focus mode moves and acts with them; Test mode only lights them up.
+fn pad_presses(ui: &AppWindow, app: &mut App, pressed: u32, released: u32) {
+    let buttons = |mask: u32| -> Vec<XButton> {
+        (0..controllers::ALL.len())
+            .filter(|i| mask & (1 << i) != 0)
+            .map(|i| controllers::ALL[i])
+            .collect()
+    };
+    if app.capturing {
+        return;
+    }
+    if let Some(run) = app.remap_run.as_mut() {
+        if run.confirm.is_some() {
+            if buttons(pressed).contains(&XButton::A) {
+                let event = run_and_remap(app).and_then(|(run, remap)| run.use_stick(remap));
+                remap_event(ui, app, event);
+            } else if buttons(released).contains(&XButton::B) {
+                run.retry();
+                play_sound(app, Sound::Back);
+            }
+            return;
+        }
+        for button in buttons(pressed) {
+            run.press(button);
+        }
+        for button in buttons(released) {
+            let event = run_and_remap(app).and_then(|(run, remap)| run.release(button, remap));
+            remap_event(ui, app, event);
+        }
+        return;
+    }
+    if app.controllers_mode != controllers::Mode::Focus {
+        return;
+    }
+    let mut moved = false;
+    for button in buttons(pressed) {
+        // A diagonal push crosses two directions at once: it moves one step.
+        let direction = matches!(
+            button,
+            XButton::DpadUp
+                | XButton::DpadDown
+                | XButton::DpadLeft
+                | XButton::DpadRight
+                | XButton::LsUp
+                | XButton::LsDown
+                | XButton::LsLeft
+                | XButton::LsRight
+                | XButton::RsUp
+                | XButton::RsDown
+                | XButton::RsLeft
+                | XButton::RsRight
+        );
+        if direction && std::mem::replace(&mut moved, true) {
+            continue;
+        }
+        let sound = match button {
+            XButton::DpadUp | XButton::LsUp | XButton::RsUp => Some(move_focus(app, Action::Up)),
+            XButton::DpadDown | XButton::LsDown | XButton::RsDown => {
+                Some(move_focus(app, Action::Down))
+            }
+            XButton::DpadLeft | XButton::LsLeft | XButton::RsLeft => {
+                Some(move_focus(app, Action::Left))
+            }
+            XButton::DpadRight | XButton::LsRight | XButton::RsRight => {
+                Some(move_focus(app, Action::Right))
+            }
+            XButton::A => start_remap_selected(ui, app),
+            XButton::X => start_capture(ui, app),
+            XButton::Y => {
+                clear_selected(ui, app);
+                let label = controllers::ALL[app.remap_selected].label();
+                app.toasts.show(ui, format!("{label}: added keys cleared"));
+                Some(Sound::Back)
+            }
+            _ => None,
+        };
+        if let Some(sound) = sound {
+            play_sound(app, sound);
+        }
+        // A remap or capture started: later presses in this batch belong to it.
+        if app.remap_run.is_some() || app.capturing {
+            break;
+        }
+    }
+}
+
+/// The remap in progress and the shown pad's remaps, which it writes to.
+fn run_and_remap(
+    app: &mut App,
+) -> Option<(&mut controllers::RemapRun, &mut BTreeMap<XButton, XButton>)> {
+    let pad = app.pads.get(app.pad_index)?.clone();
+    let App {
+        remap_run, home, ..
+    } = app;
+    let run = remap_run.as_mut()?;
+    let profile = home.state.controller_remaps.entry(pad.guid).or_default();
+    profile.name = pad.name;
+    Some((run, &mut profile.remap))
+}
+
+/// Remaps `targets` one after another, then goes back to `return_to`.
+fn start_remap(
+    ui: &AppWindow,
+    app: &mut App,
+    targets: Vec<XButton>,
+    return_to: controllers::Mode,
+) -> Option<Sound> {
+    if app.pads.get(app.pad_index).is_none() {
+        app.toasts.show(ui, "Connect a controller first".into());
+        return None;
+    }
+    // Inputs already held (the press that started it) only count once let go and pressed again.
+    app.remap_run = Some(controllers::RemapRun::new(targets, return_to));
+    Some(Sound::Confirm)
+}
+
+fn start_remap_selected(ui: &AppWindow, app: &mut App) -> Option<Sound> {
+    let target = controllers::ALL[app.remap_selected];
+    let mode = app.controllers_mode;
+    start_remap(ui, app, vec![target], mode)
+}
+
+fn remap_event(ui: &AppWindow, app: &mut App, event: Option<controllers::RemapEvent>) {
+    let Some(event) = event else { return };
+    match event {
+        controllers::RemapEvent::Assigned { target, source } => {
+            save_remaps(ui, app);
+            play_sound(app, Sound::Confirm);
+            if app
+                .remap_run
+                .as_ref()
+                .is_some_and(|run| run.target().is_none())
+            {
+                finish_remap(ui, app, Some((target, source)));
+            }
+        }
+        controllers::RemapEvent::AlreadyUsed { source, by } => {
+            play_sound(app, Sound::Bump);
+            app.toasts.show(
+                ui,
+                format!(
+                    "{} is already used for {} · press another button",
+                    source.label(),
+                    by.label()
+                ),
+            );
+        }
+        controllers::RemapEvent::AskStick { .. } => play_sound(app, Sound::Move),
+    }
+}
+
+fn finish_remap(ui: &AppWindow, app: &mut App, last: Option<(XButton, XButton)>) {
+    let Some(run) = app.remap_run.take() else {
+        return;
+    };
+    app.controllers_mode = run.return_to;
+    let text = match last {
+        _ if run.targets.len() > 1 => "All buttons remapped · press them to check".to_string(),
+        Some((target, source)) if target == source => {
+            format!("{} is back on its own button", target.label())
+        }
+        Some((target, source)) => format!("{} is now on {}", target.label(), source.label()),
+        None => "Nothing changed".to_string(),
+    };
+    app.toasts.show(ui, text);
+}
+
+/// Stops the remap in progress, keeping the buttons done so far.
+fn stop_remap(ui: &AppWindow, app: &mut App) {
+    let Some(run) = app.remap_run.take() else {
+        return;
+    };
+    app.controllers_mode = run.return_to;
+    play_sound(app, Sound::Back);
+    if run.targets.len() > 1 && run.step > 0 {
+        let done = run.step;
+        let buttons = if done == 1 { "button" } else { "buttons" };
+        app.toasts
+            .show(ui, format!("Remap stopped · {done} {buttons} kept"));
+    }
+}
+
+fn cancel_remapping(ui: &AppWindow, app: &mut App) {
+    if app.capturing {
+        app.capturing = false;
+        input::CAPTURE.store(false, Ordering::Relaxed);
+        play_sound(app, Sound::Back);
+    }
+    stop_remap(ui, app);
+}
+
+/// Switches how the Controllers screen reads the pad. Remap all starts a remap of every button.
+fn set_controllers_mode(ui: &AppWindow, app: &mut App, mode: controllers::Mode) {
+    // The add-key box is waiting for a press: it is closed first (Cancel, Esc, right click).
+    if app.capturing {
+        return;
+    }
+    if mode == controllers::Mode::RemapAll {
+        if app.remap_run.is_some() {
+            return;
+        }
+        let targets = controllers::remap_all_targets();
+        if let Some(sound) = start_remap(ui, app, targets, controllers::Mode::Test) {
+            app.controllers_mode = mode;
+            play_sound(app, sound);
+        }
+        return;
+    }
+    stop_remap(ui, app);
+    app.controllers_mode = mode;
+    play_sound(app, Sound::Tab);
+}
+
+/// The remap panel's and the add-key dialog's buttons (mouse), and Focus mode's X hint.
+fn remap_command(ui: &AppWindow, app: &mut App, command: usize) {
+    match command {
+        0 => {
+            if let Some((run, remap)) = run_and_remap(app) {
+                run.back(remap);
+                save_remaps(ui, app);
+                play_sound(app, Sound::Back);
+            }
+        }
+        1 => {
+            if let Some((run, remap)) = run_and_remap(app) {
+                run.skip(remap);
+                let finished = run.target().is_none();
+                play_sound(app, Sound::Move);
+                if finished {
+                    finish_remap(ui, app, None);
+                }
+            }
+        }
+        2 => stop_remap(ui, app),
+        3 => {
+            let event = run_and_remap(app).and_then(|(run, remap)| run.use_stick(remap));
+            remap_event(ui, app, event);
+        }
+        4 => {
+            if let Some(run) = app.remap_run.as_mut() {
+                run.retry();
+            }
+        }
+        5 => cancel_remapping(ui, app),
+        6 => {
+            cancel_remapping(ui, app);
+            clear_selected(ui, app);
+        }
+        7 if app.remap_run.is_none() && !app.capturing => {
+            if let Some(sound) = start_capture(ui, app) {
+                play_sound(app, sound);
+            }
+        }
+        _ => {}
+    }
+    sync_controllers_screen(ui, app);
+}
 
 /// Waits for the next key or pad button, which becomes an extra trigger for the selected row.
 fn start_capture(ui: &AppWindow, app: &mut App) -> Option<Sound> {
@@ -2378,17 +2699,17 @@ fn hold_tick(ui: &AppWindow, app: &mut App) {
         app.holds_done.extend(app.held_since.keys().copied());
         app.held_since.clear();
         app.hold_timer.stop();
-        show_hold(ui, None);
+        show_hold(ui, app, None);
         return;
     }
     // The hold closest to its goal is the one shown (and the one that fires).
-    let pads = app.pads.len();
+    let (pads, remapping) = (app.pads.len(), app.remap_run.is_some());
     let leading = app
         .held_since
         .iter()
         .filter(|(i, _)| !app.holds_done.contains(i))
         .filter_map(|(&i, since)| {
-            let (action, needed) = controllers::hold_action(i, pads)?;
+            let (action, needed) = controllers::hold_action(i, pads, remapping)?;
             Some((
                 i,
                 action,
@@ -2397,41 +2718,28 @@ fn hold_tick(ui: &AppWindow, app: &mut App) {
         })
         .max_by(|a, b| a.2.total_cmp(&b.2));
     let Some((index, action, progress)) = leading else {
-        show_hold(ui, None);
+        show_hold(ui, app, None);
         return;
     };
     if progress < 1.0 {
         // A quick test press shouldn't flash a progress bar.
         let held = app.held_since[&index].elapsed();
         let visible = held > Duration::from_millis(200);
-        show_hold(ui, visible.then_some((index, action, progress)));
+        show_hold(ui, app, visible.then_some((index, action, progress)));
         return;
     }
     app.holds_done.insert(index);
-    show_hold(ui, None);
+    show_hold(ui, app, None);
     match action {
         controllers::HoldAction::Leave => leave_controllers_screen(ui, app),
-        controllers::HoldAction::AddToSelected => {
-            if let Some(sound) = start_capture(ui, app) {
-                play_sound(app, sound);
-            }
-        }
-        controllers::HoldAction::ClearSelected => {
-            clear_selected(ui, app);
-            let label = controllers::ALL[app.remap_selected].label();
-            app.toasts
-                .show(ui, format!("{label}: extra triggers cleared"));
-            play_sound(app, Sound::Back);
+        controllers::HoldAction::StopRemap => stop_remap(ui, app),
+        controllers::HoldAction::SwitchMode(delta) => {
+            let mode = app.controllers_mode.step(delta);
+            set_controllers_mode(ui, app, mode);
         }
         controllers::HoldAction::SwitchPad(delta) => {
             app.pad_index = nav::wrap_index(app.pad_index, app.pads.len(), delta);
             play_sound(app, Sound::Tab);
-        }
-        controllers::HoldAction::Remap(button) => {
-            app.remap_selected = button;
-            if let Some(sound) = start_capture(ui, app) {
-                play_sound(app, sound);
-            }
         }
     }
     push_menus(ui, app);
@@ -2439,7 +2747,7 @@ fn hold_tick(ui: &AppWindow, app: &mut App) {
 }
 
 /// The hold bar (and B's ring) on the Controllers screen.
-fn show_hold(ui: &AppWindow, hold: Option<(usize, controllers::HoldAction, f32)>) {
+fn show_hold(ui: &AppWindow, app: &App, hold: Option<(usize, controllers::HoldAction, f32)>) {
     let Some((index, action, progress)) = hold else {
         ui.set_hold_progress(0.0);
         ui.set_back_progress(0.0);
@@ -2447,22 +2755,17 @@ fn show_hold(ui: &AppWindow, hold: Option<(usize, controllers::HoldAction, f32)>
     };
     let button = controllers::ALL[index].badge();
     let text = match action {
-        controllers::HoldAction::Leave => {
+        controllers::HoldAction::Leave | controllers::HoldAction::StopRemap => {
             ui.set_back_progress(progress.min(0.999));
             ui.set_hold_progress(0.0);
             return;
         }
-        controllers::HoldAction::AddToSelected => {
-            format!("Keep holding {button} to add a key or button to the selected row")
-        }
-        controllers::HoldAction::ClearSelected => {
-            format!("Keep holding {button} to clear the extra triggers")
-        }
+        controllers::HoldAction::SwitchMode(delta) => format!(
+            "Keep holding {button} for {} mode",
+            app.controllers_mode.step(delta).label()
+        ),
         controllers::HoldAction::SwitchPad(_) => {
             format!("Keep holding {button} to show the other controller")
-        }
-        controllers::HoldAction::Remap(_) => {
-            format!("Keep holding {button} to give it a new key or button")
         }
     };
     ui.set_hold_text(text.into());
@@ -2495,15 +2798,21 @@ fn drain_controller_events(ui: &AppWindow, app: &mut App) {
     while let Ok(event) = app.controller_events.try_recv() {
         match event {
             InputEvent::Pads(pads) => {
+                let shown = app.pads.get(app.pad_index).map(|p| p.id);
                 app.pads = pads;
                 app.pad_index = app.pad_index.min(app.pads.len().saturating_sub(1));
+                // The remap belongs to the pad that was shown.
+                if app.pads.get(app.pad_index).map(|p| p.id) != shown {
+                    stop_remap(ui, app);
+                }
             }
-            InputEvent::Live(mask) => {
-                let live: Vec<bool> = (0..controllers::ALL.len())
-                    .map(|i| mask & (1 << i) != 0)
-                    .collect();
-                ui.set_live(ModelRc::new(VecModel::from(live)));
-                track_holds(ui, app, mask);
+            InputEvent::Live { raw, out } => {
+                let pressed = raw & !app.live_raw;
+                let released = app.live_raw & !raw;
+                app.live_raw = raw;
+                app.live_out = out;
+                track_holds(ui, app, raw);
+                pad_presses(ui, app, pressed, released);
             }
             InputEvent::Captured(trigger) if app.capturing => {
                 app.capturing = false;
@@ -2531,8 +2840,7 @@ fn drain_controller_events(ui: &AppWindow, app: &mut App) {
             }
             InputEvent::CaptureTimedOut => {
                 app.capturing = false;
-                app.toasts
-                    .show(ui, "Nothing pressed: no trigger added".into());
+                app.toasts.show(ui, "Nothing pressed: no key added".into());
             }
             _ => {}
         }
@@ -2565,7 +2873,7 @@ fn sync_controllers_screen(ui: &AppWindow, app: &mut App) {
         (None, _) => "No controller connected".to_string(),
         (Some(pad), 1) => pad.name.clone(),
         (Some(pad), n) => format!(
-            "{}  ·  {} of {n}  ·  LB / RB to switch",
+            "{}  ·  {} of {n}  ·  hold LB / RB to switch",
             pad.name,
             app.pad_index + 1
         ),
@@ -2575,26 +2883,31 @@ fn sync_controllers_screen(ui: &AppWindow, app: &mut App) {
         .pads
         .get(app.pad_index)
         .and_then(|p| app.home.state.controller_remaps.get(&p.guid));
+    let routes = profile.map(|p| controllers::routes(&p.remap));
     let rows: Vec<RemapRow> = controllers::ALL
         .iter()
         .enumerate()
         .map(|(i, button)| {
             let (column, row) = controllers::place(i);
-            let extra = profile
+            let mut parts = Vec::new();
+            match profile.and_then(|p| p.remap.get(button)) {
+                Some(source) => parts.push(format!("Now on {}", source.label())),
+                None if routes.is_some_and(|r| r[i] != Some(*button)) => {
+                    parts.push("Not on any button".to_string())
+                }
+                None => {}
+            }
+            if let Some(extra) = profile
                 .and_then(|p| p.extra.get(button))
-                .filter(|list| !list.is_empty());
+                .filter(|list| !list.is_empty())
+            {
+                let keys: Vec<String> = extra.iter().map(|t| t.label()).collect();
+                parts.push(format!("+ {}", keys.join(", ")));
+            }
             RemapRow {
                 badge: button.badge().into(),
                 label: button.label().into(),
-                value: extra
-                    .map(|list| {
-                        list.iter()
-                            .map(|t| t.label())
-                            .collect::<Vec<_>>()
-                            .join(", ")
-                    })
-                    .unwrap_or_default()
-                    .into(),
+                value: parts.join("  ·  ").into(),
                 column: column as i32,
                 row: row as i32,
             }
@@ -2602,13 +2915,73 @@ fn sync_controllers_screen(ui: &AppWindow, app: &mut App) {
         .collect();
     ui.set_remap_rows(ModelRc::new(VecModel::from(rows)));
     ui.set_remap_index(app.remap_selected as i32);
+    let mode = app.controllers_mode;
+    ui.set_controllers_mode(
+        controllers::Mode::ALL
+            .iter()
+            .position(|m| *m == mode)
+            .unwrap_or(0) as i32,
+    );
+    ui.set_multiple_pads(app.pads.len() > 1);
+    let run = app.remap_run.as_ref();
+    ui.set_remap_highlight(match run {
+        Some(run) => run.target().map_or(-1, |t| controllers::index_of(t) as i32),
+        None if mode == controllers::Mode::Focus => app.remap_selected as i32,
+        None => -1,
+    });
+    // While remapping, only the button being remapped is lit.
+    let shown = if run.is_some() { 0 } else { app.live_out };
+    let live: Vec<bool> = (0..controllers::ALL.len())
+        .map(|i| shown & (1 << i) != 0)
+        .collect();
+    ui.set_live(ModelRc::new(VecModel::from(live)));
+    ui.set_run_active(run.is_some());
+    if let Some(run) = run
+        && let Some(target) = run.target()
+    {
+        let (kind, title, detail) = match run.confirm {
+            Some(source) => (
+                2,
+                format!(
+                    "You moved the {}. Use it for {}?",
+                    source.label().to_lowercase(),
+                    target.label()
+                ),
+                "A: use it  ·  B: press again  ·  Hold B: stop".to_string(),
+            ),
+            None if run.targets.len() == 1 => (
+                0,
+                format!("Press the button that should act as {}", target.label()),
+                "Its own button puts it back to normal  ·  Hold B to cancel".to_string(),
+            ),
+            None => (
+                1,
+                format!("Press the button for {}", target.label()),
+                format!(
+                    "{} of {}  ·  Hold B to stop",
+                    run.step + 1,
+                    run.targets.len()
+                ),
+            ),
+        };
+        ui.set_run_kind(kind);
+        ui.set_run_title(title.into());
+        ui.set_run_detail(detail.into());
+        ui.set_run_can_back(run.step > 0);
+    }
     ui.set_capturing(app.capturing);
+    let selected = controllers::ALL[app.remap_selected];
     ui.set_capture_text(
         format!(
-            "Press a key or a pad button that should also act as {}",
-            controllers::ALL[app.remap_selected].label()
+            "Press a key or a pad button that should also press {}",
+            selected.label()
         )
         .into(),
+    );
+    ui.set_capture_can_clear(
+        profile
+            .and_then(|p| p.extra.get(&selected))
+            .is_some_and(|list| !list.is_empty()),
     );
 }
 

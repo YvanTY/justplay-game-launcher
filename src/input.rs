@@ -20,8 +20,12 @@ pub enum InputEvent {
     HomeCombo,
     /// The connected controllers changed (for the Controllers screen).
     Pads(Vec<PadInfo>),
-    /// Buttons currently held on the pad shown in the Controllers screen (bit i = controllers::ALL[i]).
-    Live(u32),
+    /// The pad shown in the Controllers screen (bit i = controllers::ALL[i]): the inputs held
+    /// on it, and the buttons a game would see from them after remaps.
+    Live {
+        raw: u32,
+        out: u32,
+    },
     /// The key or button pressed while the Controllers screen was waiting for one.
     Captured(Trigger),
     /// Nothing was pressed in time; the screen stops waiting.
@@ -134,7 +138,7 @@ fn run(emit: impl Fn(InputEvent)) {
         own_pads: HashSet::new(),
         last_emulation_error: String::new(),
         guids: HashMap::new(),
-        live_mask: 0,
+        live_mask: (0, 0),
         capture_keys: None,
         capture_mask: 0,
         capture_started: Instant::now(),
@@ -202,7 +206,8 @@ struct Pads<F: Fn(InputEvent)> {
     last_emulation_error: String,
     /// SDL GUID string per opened gamepad, to find its remap profile.
     guids: HashMap<u32, String>,
-    live_mask: u32,
+    /// The last Live event sent: (pad inputs held, buttons the game sees).
+    live_mask: (u32, u32),
     /// Keys already held when capture started (only new presses count).
     capture_keys: Option<HashSet<u16>>,
     /// Buttons already held when capture started.
@@ -642,9 +647,18 @@ impl<F: Fn(InputEvent)> Pads<F> {
     fn update_live_and_capture(&mut self) {
         let live_id = LIVE_PAD.load(Ordering::Relaxed);
         let mask = self.gamepads.get(&live_id).map_or(0, |&pad| held_mask(pad));
-        if mask != self.live_mask {
-            self.live_mask = mask;
-            (self.emit)(InputEvent::Live(mask));
+        let out = self
+            .guids
+            .get(&live_id)
+            .and_then(|guid| {
+                let remaps = REMAPS.read().ok()?;
+                let profile = remaps.get(guid)?;
+                Some(controllers::output_mask(profile, mask, key_down))
+            })
+            .unwrap_or(mask);
+        if (mask, out) != self.live_mask {
+            self.live_mask = (mask, out);
+            (self.emit)(InputEvent::Live { raw: mask, out });
         }
         if !CAPTURE.load(Ordering::Relaxed) {
             self.capture_keys = None;
@@ -847,47 +861,92 @@ fn keys_matching(pressed: impl Fn(i16) -> bool) -> HashSet<u16> {
         .collect()
 }
 
-/// Presses the buttons whose extra triggers (keyboard keys or other pad buttons) are held.
-fn apply_remaps(report: &mut vigem_client::XGamepad, guid: &str, source: *mut SDL_Gamepad) {
+fn key_down(vk: u16) -> bool {
     use windows_sys::Win32::UI::Input::KeyboardAndMouse::GetAsyncKeyState;
+    (unsafe { GetAsyncKeyState(vk as i32) }) < 0
+}
+
+/// Applies the pad model's remaps to `report`: replacements first (inputs moved to other
+/// buttons), then extra triggers (keyboard keys or other pad buttons that also press one).
+/// Inputs left in place keep their analog values.
+fn apply_remaps(report: &mut vigem_client::XGamepad, guid: &str, source: *mut SDL_Gamepad) {
     let Ok(remaps) = REMAPS.read() else { return };
     let Some(profile) = remaps.get(guid) else {
         return;
     };
     let source_held = held_mask(source);
+    let held = |button: XButton| source_held & (1 << controllers::index_of(button)) != 0;
+    if !profile.remap.is_empty() {
+        let routes = controllers::routes(&profile.remap);
+        // Buttons no longer pressed by their own input lose what that input put in the report.
+        for (i, button) in controllers::ALL.iter().enumerate() {
+            if routes[i] != Some(*button) {
+                release(report, *button);
+            }
+        }
+        for (i, button) in controllers::ALL.iter().enumerate() {
+            if let Some(target) = routes[i]
+                && target != *button
+                && held(*button)
+            {
+                press(report, target);
+            }
+        }
+    }
     for (button, triggers) in &profile.extra {
         let active = triggers.iter().any(|trigger| match trigger {
-            Trigger::Key { vk, .. } => (unsafe { GetAsyncKeyState(*vk as i32) }) < 0,
-            Trigger::Button { button } => {
-                let index = controllers::ALL
-                    .iter()
-                    .position(|b| b == button)
-                    .unwrap_or(0);
-                source_held & (1 << index) != 0
-            }
+            Trigger::Key { vk, .. } => key_down(*vk),
+            Trigger::Button { button } => held(*button),
         });
-        if !active {
-            continue;
+        if active {
+            press(report, *button);
         }
-        if let Some(flag) = button.xinput_flag() {
-            report.buttons.raw |= flag;
-        } else if let Some((stick, direction)) = button.stick_direction() {
-            // Full deflection; XInput's y axis points up.
-            let (x, y) = match stick {
-                Stick::Left => (&mut report.thumb_lx, &mut report.thumb_ly),
-                Stick::Right => (&mut report.thumb_rx, &mut report.thumb_ry),
-            };
-            match direction {
-                Direction::Up => *y = i16::MAX,
-                Direction::Down => *y = i16::MIN,
-                Direction::Left => *x = i16::MIN,
-                Direction::Right => *x = i16::MAX,
-            }
-        } else if *button == XButton::Lt {
-            report.left_trigger = u8::MAX;
-        } else {
-            report.right_trigger = u8::MAX;
+    }
+}
+
+/// Presses `button` fully: sticks to full deflection, triggers all the way.
+fn press(report: &mut vigem_client::XGamepad, button: XButton) {
+    if let Some(flag) = button.xinput_flag() {
+        report.buttons.raw |= flag;
+    } else if let Some((stick, direction)) = button.stick_direction() {
+        // XInput's y axis points up.
+        let (x, y) = match stick {
+            Stick::Left => (&mut report.thumb_lx, &mut report.thumb_ly),
+            Stick::Right => (&mut report.thumb_rx, &mut report.thumb_ry),
+        };
+        match direction {
+            Direction::Up => *y = i16::MAX,
+            Direction::Down => *y = i16::MIN,
+            Direction::Left => *x = i16::MIN,
+            Direction::Right => *x = i16::MAX,
         }
+    } else if button == XButton::Lt {
+        report.left_trigger = u8::MAX;
+    } else {
+        report.right_trigger = u8::MAX;
+    }
+}
+
+/// Takes `button` out of the report: a stick direction clears only its half of the axis.
+fn release(report: &mut vigem_client::XGamepad, button: XButton) {
+    if let Some(flag) = button.xinput_flag() {
+        report.buttons.raw &= !flag;
+    } else if let Some((stick, direction)) = button.stick_direction() {
+        let (x, y) = match stick {
+            Stick::Left => (&mut report.thumb_lx, &mut report.thumb_ly),
+            Stick::Right => (&mut report.thumb_rx, &mut report.thumb_ry),
+        };
+        match direction {
+            Direction::Up if *y > 0 => *y = 0,
+            Direction::Down if *y < 0 => *y = 0,
+            Direction::Left if *x < 0 => *x = 0,
+            Direction::Right if *x > 0 => *x = 0,
+            _ => {}
+        }
+    } else if button == XButton::Lt {
+        report.left_trigger = 0;
+    } else {
+        report.right_trigger = 0;
     }
 }
 

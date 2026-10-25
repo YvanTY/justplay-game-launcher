@@ -5,7 +5,7 @@ export enum Action { up, down, left, right, confirm, back, options, tab-prev, ta
 export enum Zone { tabs, icons, actions, recent }
 
 // What a mouse click landed on; main.rs turns it into the same steps a controller would take.
-export enum Target { none, tab, gear, tile, play, more, recent, sheet-item, sheet-outside, dismiss, panel-tile, power-item, settings-row, settings-step, remap-row, hold-exit, add-row, art-thumb }
+export enum Target { none, tab, gear, tile, play, more, recent, sheet-item, sheet-outside, dismiss, panel-tile, power-item, settings-row, settings-step, remap-row, hold-exit, add-row, art-thumb, remap-button, controller-mode, remap-command }
 
 // Mouse input for the whole window. The pointer only shows while the mouse is being used.
 export global Mouse {
@@ -155,12 +155,40 @@ component RemapRowView inherits Rectangle {
             }
 
             Text {
-                text: data.value == "" ? "No extra trigger" : "+ " + data.value;
+                text: data.value == "" ? "Default" : data.value;
                 font-size: 16 * u;
                 color: data.value == "" ? #ffffff4d : #8cc4ff;
                 overflow: elide;
             }
         }
+    }
+}
+
+// A clickable pill on the Controllers screen's remap panel and dialogs.
+component CommandButton inherits Rectangle {
+    in property <string> label;
+    in property <int> command;
+    in property <bool> primary;
+    in property <length> u;
+    height: 52 * u;
+    border-radius: 26 * u;
+    background: primary ? #2d8cff : hit.has-hover && Mouse.visible ? #ffffff2e : #ffffff17;
+    border-width: 1px;
+    border-color: primary ? transparent : #ffffff26;
+    HorizontalLayout {
+        padding-left: 28 * u;
+        padding-right: 28 * u;
+        Text {
+            text: label;
+            font-size: 21 * u;
+            color: white;
+            vertical-alignment: center;
+        }
+    }
+
+    hit := Hit {
+        target: Target.remap-command;
+        a: command;
     }
 }
 
@@ -625,6 +653,19 @@ export component AppWindow inherits Window {
     in property <[bool]> live;
     in property <bool> capturing;
     in property <string> capture-text;
+    in property <bool> capture-can-clear;
+    // The button lit on the picture and its row: the focused one (Focus mode) or the one being
+    // remapped; -1 for none (Test mode).
+    in property <int> remap-highlight: -1;
+    // 0 Test, 1 Focus, 2 Remap all.
+    in property <int> controllers-mode;
+    in property <bool> multiple-pads;
+    // A remap in progress: 0 one button, 1 all buttons, 2 asking about a stick.
+    in property <bool> run-active;
+    in property <int> run-kind;
+    in property <string> run-title;
+    in property <string> run-detail;
+    in property <bool> run-can-back;
     in property <float> back-progress;
     // Controllers screen: how far a held button is toward its action, and what it will do.
     in property <float> hold-progress;
@@ -1212,14 +1253,15 @@ export component AppWindow inherits Window {
         property <length> box-y: picture-y + picture-h + 20 * u;
         // Where each input sits on the picture (units of picture-w / 1000), in controllers::ALL order.
         property <[{x: float, y: float}]> anchors: picture.anchors;
-        property <RemapRow> selected-row: remap-rows[remap-index];
+        property <int> lit: Math.max(remap-highlight, 0);
+        property <RemapRow> selected-row: remap-rows[lit];
         property <length> row-x: selected-row.column == 0 ? margin : selected-row.column == 2 ? root.width - margin - column-w : (root.width - column-w) / 2;
         property <length> row-y: selected-row.column == 1 ? box-y + selected-row.row * row-pitch : list-y + selected-row.row * row-pitch;
         // Connector start: the row's edge facing the picture.
         property <length> line-x: selected-row.column == 0 ? row-x + column-w : selected-row.column == 2 ? row-x : row-x + column-w / 2;
         property <length> line-y: selected-row.column == 1 ? row-y : row-y + row-h / 2;
-        property <length> end-x: picture-x + anchors[remap-index].x * ps;
-        property <length> end-y: picture-y + anchors[remap-index].y * ps;
+        property <length> end-x: picture-x + anchors[lit].x * ps;
+        property <length> end-y: picture-y + anchors[lit].y * ps;
 
         background: @radial-gradient(circle, #1a2744 0%, #0d1320 45%, #080b12 100%);
         Hit { }
@@ -1242,8 +1284,47 @@ export component AppWindow inherits Window {
             color: #ffffffb3;
         }
 
-        // Elbow line from the selected row to its button on the picture.
-        Path {
+        // How the pad is read; click one, or hold LT / RT.
+        HorizontalLayout {
+            x: root.width - margin - self.width;
+            y: 40 * u;
+            width: 500 * u;
+            height: 48 * u;
+            spacing: 10 * u;
+            for mode[i] in ["Test", "Focus", "Remap all"]: Rectangle {
+                border-radius: 24 * u;
+                background: i == controllers-mode ? #2d8cff : mode-hit.has-hover && Mouse.visible ? #ffffff2e : #ffffff12;
+                border-width: 1px;
+                border-color: i == controllers-mode ? transparent : #ffffff1f;
+                HorizontalLayout {
+                    padding-left: 24 * u;
+                    padding-right: 24 * u;
+                    Text {
+                        text: mode;
+                        font-size: 20 * u;
+                        font-weight: i == controllers-mode ? 600 : 400;
+                        color: white;
+                        vertical-alignment: center;
+                    }
+                }
+
+                mode-hit := Hit {
+                    target: Target.controller-mode;
+                    a: i;
+                }
+            }
+        }
+
+        Text {
+            x: root.width - margin - self.width;
+            y: 100 * u;
+            text: "Hold LT / RT to switch";
+            font-size: 18 * u;
+            color: #ffffff66;
+        }
+
+        // Elbow line from the lit row to its button on the picture.
+        if remap-highlight >= 0: Path {
             width: root.width;
             height: root.height;
             viewbox-width: root.width / 1px;
@@ -1271,11 +1352,21 @@ export component AppWindow inherits Window {
             y: picture-y;
             width: picture-w;
             height: picture-h;
-            highlight: remap-index;
+            highlight: remap-highlight;
             live: live;
         }
 
-        Rectangle {
+        // Click a button on the picture to remap it.
+        for anchor[i] in anchors: Hit {
+            target: Target.remap-button;
+            a: i;
+            x: picture-x + anchor.x * ps - 34 * ps;
+            y: picture-y + anchor.y * ps - 34 * ps;
+            width: 68 * ps;
+            height: 68 * ps;
+        }
+
+        if remap-highlight >= 0: Rectangle {
             x: end-x - 5px;
             y: end-y - 5px;
             width: 10px;
@@ -1291,7 +1382,7 @@ export component AppWindow inherits Window {
             }
 
             data: row;
-            selected: i == remap-index;
+            selected: i == remap-highlight;
             pressed: live[i];
             u: u;
             width: column-w;
@@ -1307,22 +1398,51 @@ export component AppWindow inherits Window {
             height: 46 * u;
             alignment: end;
             spacing: 32 * u;
-            Text {
-                text: "Hold any other button 3 s to remap it";
-                color: #ffffff73;
-                font-size: 18 * u;
+            if !run-active && controllers-mode == 0: Text {
+                text: "Press any button to test it  ·  Click a button on the controller to remap it  ·  Click a row to add a key";
+                color: #ffffff80;
+                font-size: 19 * u;
                 vertical-alignment: center;
             }
 
-            ButtonHint {
+            if !run-active && controllers-mode == 1: ButtonHint {
                 key: "A";
-                label: "Hold: add key or button";
+                label: "Remap";
                 u: u;
             }
 
-            ButtonHint {
+            if !run-active && controllers-mode == 1: Rectangle {
+                border-radius: 10 * u;
+                background: x-hit.has-hover && Mouse.visible ? #ffffff1a : transparent;
+                HorizontalLayout {
+                    padding-left: 6 * u;
+                    padding-right: 6 * u;
+                    spacing: 10 * u;
+                    VerticalLayout {
+                        alignment: center;
+                        Badge {
+                            label: "X";
+                            u: u;
+                        }
+                    }
+
+                    Text {
+                        text: "Add a key";
+                        color: #ffffffa6;
+                        font-size: 20 * u;
+                        vertical-alignment: center;
+                    }
+                }
+
+                x-hit := Hit {
+                    target: Target.remap-command;
+                    a: 7;
+                }
+            }
+
+            if !run-active && controllers-mode == 1: ButtonHint {
                 key: "Y";
-                label: "Hold: clear";
+                label: "Clear added keys";
                 u: u;
             }
 
@@ -1332,15 +1452,81 @@ export component AppWindow inherits Window {
                     progress: back-progress;
                     u: u;
                     Hit {
-                        target: Target.hold-exit;
+                        target: run-active ? Target.remap-command : Target.hold-exit;
+                        a: 2;
                     }
                 }
 
                 Text {
-                    text: "Hold to exit";
+                    text: run-active ? "Hold to stop" : "Hold to exit";
                     color: #ffffffa6;
                     font-size: 20 * u;
                     vertical-alignment: center;
+                }
+            }
+        }
+
+        // The remap in progress: what to press, and mouse buttons to go back, skip or stop.
+        if run-active: Rectangle {
+            x: (parent.width - self.width) / 2;
+            y: root.height - 290 * u;
+            width: 1180 * u;
+            height: 200 * u;
+            border-radius: 24 * u;
+            background: #121a2bf7;
+            border-width: 2px;
+            border-color: run-kind == 2 ? #f5b942 : #2d8cff;
+            drop-shadow-blur: 50 * u;
+            drop-shadow-color: #2d8cff50;
+            VerticalLayout {
+                alignment: center;
+                spacing: 12 * u;
+                padding: 22 * u;
+                Text {
+                    text: run-title;
+                    font-size: 30 * u;
+                    font-weight: 600;
+                    color: white;
+                    horizontal-alignment: center;
+                    overflow: elide;
+                }
+
+                Text {
+                    text: run-detail;
+                    font-size: 20 * u;
+                    color: #ffffff99;
+                    horizontal-alignment: center;
+                }
+
+                HorizontalLayout {
+                    alignment: center;
+                    spacing: 16 * u;
+                    if run-kind == 1 && run-can-back: CommandButton {
+                        label: "Back";
+                        command: 0;
+                        u: u;
+                    }
+                    if run-kind == 1: CommandButton {
+                        label: "Skip";
+                        command: 1;
+                        u: u;
+                    }
+                    if run-kind == 2: CommandButton {
+                        label: "Use it";
+                        command: 3;
+                        primary: true;
+                        u: u;
+                    }
+                    if run-kind == 2: CommandButton {
+                        label: "Press again";
+                        command: 4;
+                        u: u;
+                    }
+                    CommandButton {
+                        label: run-kind == 0 ? "Cancel" : "Stop";
+                        command: 2;
+                        u: u;
+                    }
                 }
             }
         }
@@ -1386,7 +1572,7 @@ export component AppWindow inherits Window {
                 x: (parent.width - self.width) / 2;
                 y: (parent.height - self.height) / 2;
                 width: 980 * u;
-                height: 220 * u;
+                height: 290 * u;
                 border-radius: 24 * u;
                 background: #121a2bfa;
                 border-width: 2px;
@@ -1410,6 +1596,21 @@ export component AppWindow inherits Window {
                         font-size: 20 * u;
                         color: #ffffff80;
                         horizontal-alignment: center;
+                    }
+
+                    HorizontalLayout {
+                        alignment: center;
+                        spacing: 16 * u;
+                        if capture-can-clear: CommandButton {
+                            label: "Remove added keys";
+                            command: 6;
+                            u: u;
+                        }
+                        CommandButton {
+                            label: "Cancel";
+                            command: 5;
+                            u: u;
+                        }
                     }
                 }
             }

@@ -1,6 +1,7 @@
 //! The Controllers screen: the Xbox-style buttons the virtual pad exposes, their places in the
 //! three lists around the controller picture (left column, D-pad box, right column), and the
-//! extra triggers ("keyboard Insert also presses L3") saved per controller model.
+//! remaps saved per controller model: replacements ("the pad's X now presses A") and extra
+//! triggers ("keyboard Insert also presses L3").
 
 use std::collections::{BTreeMap, HashMap};
 use std::sync::{LazyLock, RwLock};
@@ -238,12 +239,15 @@ impl Trigger {
     }
 }
 
-/// Extra triggers for one controller model, keyed by SDL's GUID for that model.
+/// Remaps for one controller model, keyed by SDL's GUID for that model.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Profile {
     pub name: String,
     pub extra: BTreeMap<XButton, Vec<Trigger>>,
+    /// Button -> the pad input that now presses it instead (replacing, not adding: that input
+    /// stops pressing its own button, and the button's own input stops pressing it).
+    pub remap: BTreeMap<XButton, XButton>,
 }
 
 /// A button can have at most this many extra triggers; older ones drop off.
@@ -267,38 +271,251 @@ impl Profile {
 /// Remaps shared with the input thread, which applies them to the virtual Xbox pads.
 pub static REMAPS: LazyLock<RwLock<HashMap<String, Profile>>> = LazyLock::new(Default::default);
 
-/// Cursor movement through the three lists in all four directions.
-/// What holding a pad button does on the Controllers screen. A quick press only lights the
-/// button up, so every button can be tested without leaving or changing anything.
+pub fn index_of(button: XButton) -> usize {
+    ALL.iter().position(|b| *b == button).unwrap_or(0)
+}
+
+/// For each pad input (in `ALL` order), the button it presses under `remap`: itself unless
+/// remapped. An input given to another button stops pressing its own, and a remapped button
+/// is no longer pressed by its own input.
+pub fn routes(remap: &BTreeMap<XButton, XButton>) -> [Option<XButton>; 25] {
+    let mut routes = ALL.map(Some);
+    for target in remap.keys() {
+        routes[index_of(*target)] = None;
+    }
+    for (target, source) in remap {
+        routes[index_of(*source)] = Some(*target);
+    }
+    routes
+}
+
+/// The buttons the game sees for the held pad inputs `raw` (bit i = ALL[i]).
+pub fn output_mask(profile: &Profile, raw: u32, key_down: impl Fn(u16) -> bool) -> u32 {
+    let held = |i: usize| raw & (1 << i) != 0;
+    let routes = routes(&profile.remap);
+    let mut mask = (0..ALL.len())
+        .filter(|&i| held(i))
+        .filter_map(|i| routes[i])
+        .fold(0, |mask, button| mask | (1 << index_of(button)));
+    for (button, triggers) in &profile.extra {
+        let active = triggers.iter().any(|trigger| match trigger {
+            Trigger::Key { vk, .. } => key_down(*vk),
+            Trigger::Button { button } => held(index_of(*button)),
+        });
+        if active {
+            mask |= 1 << index_of(*button);
+        }
+    }
+    mask
+}
+
+/// How the Controllers screen reads the pad.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Mode {
+    /// Buttons only light up, so every one can be checked. The mouse remaps.
+    #[default]
+    Test,
+    /// The D-pad and sticks move between buttons; A remaps, X adds a key, Y clears.
+    Focus,
+    /// Every button in turn: press the one that should act as the lit button.
+    RemapAll,
+}
+
+impl Mode {
+    pub const ALL: [Mode; 3] = [Mode::Test, Mode::Focus, Mode::RemapAll];
+
+    pub fn step(self, delta: isize) -> Mode {
+        let index = Self::ALL.iter().position(|m| *m == self).unwrap_or(0) as isize;
+        Self::ALL[(index + delta).rem_euclid(Self::ALL.len() as isize) as usize]
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Mode::Test => "Test",
+            Mode::Focus => "Focus",
+            Mode::RemapAll => "Remap all",
+        }
+    }
+}
+
+/// What holding a pad button does on the Controllers screen. A quick press does nothing
+/// beyond lighting the button up, so every button can be tested.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum HoldAction {
     Leave,
-    /// Add a key or button to the selected row.
-    AddToSelected,
-    /// Remove the selected row's extra triggers.
-    ClearSelected,
+    /// Stop a remap in progress, keeping the buttons done so far.
+    StopRemap,
+    /// The previous (-1) or next (+1) mode.
+    SwitchMode(isize),
     /// Show the previous (-1) or next (+1) connected pad.
     SwitchPad(isize),
-    /// Select this button's row and add a key or button to it.
-    Remap(usize),
 }
 
-/// The action for holding the input at `index` (in `ALL` order), and how long it takes.
-/// Directions move the selection, so holding them does nothing more.
-pub fn hold_action(index: usize, pads: usize) -> Option<(HoldAction, Duration)> {
+/// The action for holding the pad input at `index` (in `ALL` order), and how long it takes.
+/// While remapping, every other button is being recorded, so only B's hold counts.
+pub fn hold_action(index: usize, pads: usize, remapping: bool) -> Option<(HoldAction, Duration)> {
     let button = *ALL.get(index)?;
+    let second = Duration::from_secs(1);
     Some(match button {
+        XButton::B if remapping => (HoldAction::StopRemap, Duration::from_secs(2)),
         XButton::B => (HoldAction::Leave, Duration::from_secs(2)),
-        XButton::A => (HoldAction::AddToSelected, Duration::from_secs(1)),
-        XButton::Y => (HoldAction::ClearSelected, Duration::from_secs(1)),
-        XButton::Lb if pads > 1 => (HoldAction::SwitchPad(-1), Duration::from_secs(1)),
-        XButton::Rb if pads > 1 => (HoldAction::SwitchPad(1), Duration::from_secs(1)),
-        XButton::DpadUp | XButton::DpadDown | XButton::DpadLeft | XButton::DpadRight => {
+        _ if remapping => return None,
+        XButton::Lt => (HoldAction::SwitchMode(-1), second),
+        XButton::Rt => (HoldAction::SwitchMode(1), second),
+        XButton::Lb if pads > 1 => (HoldAction::SwitchPad(-1), second),
+        XButton::Rb if pads > 1 => (HoldAction::SwitchPad(1), second),
+        _ => return None,
+    })
+}
+
+/// What a press during a remap led to.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RemapEvent {
+    Assigned {
+        target: XButton,
+        source: XButton,
+    },
+    /// Refused: one input can't press two buttons in the same remap.
+    AlreadyUsed {
+        source: XButton,
+        by: XButton,
+    },
+    /// A stick moved while a button was lit: maybe by accident, so the user decides.
+    AskStick {
+        source: XButton,
+    },
+}
+
+/// Remapping buttons one after another (one button for a single remap). A press counts when
+/// it is let go, so B held to stop is never recorded. Each step is written to `remap` at
+/// once, so stopping keeps the buttons done so far.
+#[derive(Clone, Debug)]
+pub struct RemapRun {
+    pub targets: Vec<XButton>,
+    pub step: usize,
+    /// The input pressed for the lit button, recorded when released.
+    pending: Option<XButton>,
+    /// A stick direction waiting for "use it?".
+    pub confirm: Option<XButton>,
+    /// Per step done: the input used (None when skipped) and the remaps before it.
+    done: Vec<(Option<XButton>, BTreeMap<XButton, XButton>)>,
+    /// The mode to go back to afterwards.
+    pub return_to: Mode,
+}
+
+/// The buttons a "Remap all" goes through: all but Guide, which many pads lack and which
+/// Windows or Steam often take for themselves.
+pub fn remap_all_targets() -> Vec<XButton> {
+    ALL.into_iter().filter(|b| *b != XButton::Guide).collect()
+}
+
+impl RemapRun {
+    pub fn new(targets: Vec<XButton>, return_to: Mode) -> Self {
+        RemapRun {
+            targets,
+            step: 0,
+            pending: None,
+            confirm: None,
+            done: Vec::new(),
+            return_to,
+        }
+    }
+
+    pub fn target(&self) -> Option<XButton> {
+        self.targets.get(self.step).copied()
+    }
+
+    /// A pad input went down. A button beats a stick moved alongside it.
+    pub fn press(&mut self, source: XButton) {
+        if self.confirm.is_some() {
+            return;
+        }
+        match self.pending {
+            None => self.pending = Some(source),
+            Some(p) if p.stick_direction().is_some() && source.stick_direction().is_none() => {
+                self.pending = Some(source)
+            }
+            _ => {}
+        }
+    }
+
+    /// A pad input was let go: if it is the pressed one, it is recorded for the lit button.
+    pub fn release(
+        &mut self,
+        source: XButton,
+        remap: &mut BTreeMap<XButton, XButton>,
+    ) -> Option<RemapEvent> {
+        if self.pending != Some(source) || self.confirm.is_some() {
             return None;
         }
-        b if b.stick_direction().is_some() => return None,
-        _ => (HoldAction::Remap(index), Duration::from_secs(3)),
-    })
+        self.pending = None;
+        let target = self.target()?;
+        if let Some(by) = self.used_by(source) {
+            return Some(RemapEvent::AlreadyUsed { source, by });
+        }
+        if source.stick_direction().is_some() && target.stick_direction().is_none() {
+            self.confirm = Some(source);
+            return Some(RemapEvent::AskStick { source });
+        }
+        Some(self.assign(target, source, remap))
+    }
+
+    /// "Use it": the stick direction asked about is recorded.
+    pub fn use_stick(&mut self, remap: &mut BTreeMap<XButton, XButton>) -> Option<RemapEvent> {
+        let source = self.confirm.take()?;
+        let target = self.target()?;
+        Some(self.assign(target, source, remap))
+    }
+
+    /// "Press again": forget the stick direction and wait for another press.
+    pub fn retry(&mut self) {
+        self.confirm = None;
+        self.pending = None;
+    }
+
+    /// Leaves the lit button as it is and moves on.
+    pub fn skip(&mut self, remap: &BTreeMap<XButton, XButton>) {
+        if self.target().is_none() {
+            return;
+        }
+        self.retry();
+        self.done.push((None, remap.clone()));
+        self.step += 1;
+    }
+
+    /// Goes back one button, undoing what was recorded for it.
+    pub fn back(&mut self, remap: &mut BTreeMap<XButton, XButton>) {
+        self.retry();
+        if let Some((_, before)) = self.done.pop() {
+            *remap = before;
+            self.step -= 1;
+        }
+    }
+
+    fn used_by(&self, source: XButton) -> Option<XButton> {
+        self.done
+            .iter()
+            .zip(&self.targets)
+            .find(|((used, _), _)| *used == Some(source))
+            .map(|(_, target)| *target)
+    }
+
+    fn assign(
+        &mut self,
+        target: XButton,
+        source: XButton,
+        remap: &mut BTreeMap<XButton, XButton>,
+    ) -> RemapEvent {
+        self.done.push((Some(source), remap.clone()));
+        remap.retain(|_, s| *s != source);
+        if source == target {
+            remap.remove(&target);
+        } else {
+            remap.insert(target, source);
+        }
+        self.step += 1;
+        RemapEvent::Assigned { target, source }
+    }
 }
 
 pub fn navigate(selected: usize, action: Action) -> usize {
@@ -354,40 +571,164 @@ mod tests {
     }
 
     #[test]
-    fn holds_leave_add_clear_or_remap() {
+    fn holds_leave_switch_mode_or_pad() {
         let secs = |s| Duration::from_secs(s);
+        let hold = |button, pads, remapping| hold_action(index(button), pads, remapping);
         assert_eq!(
-            hold_action(index(XButton::B), 1),
+            hold(XButton::B, 1, false),
             Some((HoldAction::Leave, secs(2)))
         );
         assert_eq!(
-            hold_action(index(XButton::A), 1),
-            Some((HoldAction::AddToSelected, secs(1)))
+            hold(XButton::Lt, 1, false),
+            Some((HoldAction::SwitchMode(-1), secs(1)))
         );
         assert_eq!(
-            hold_action(index(XButton::Y), 1),
-            Some((HoldAction::ClearSelected, secs(1)))
+            hold(XButton::Rt, 1, false),
+            Some((HoldAction::SwitchMode(1), secs(1)))
         );
-        let x = index(XButton::X);
-        assert_eq!(hold_action(x, 1), Some((HoldAction::Remap(x), secs(3))));
-        let lb = index(XButton::Lb);
+        assert_eq!(hold(XButton::Lb, 1, false), None, "one pad");
         assert_eq!(
-            hold_action(lb, 1),
-            Some((HoldAction::Remap(lb), secs(3))),
-            "one pad"
+            hold(XButton::Rb, 2, false),
+            Some((HoldAction::SwitchPad(1), secs(1)))
         );
+        // No more hold-to-remap: other buttons only light up.
+        for button in [
+            XButton::A,
+            XButton::X,
+            XButton::Y,
+            XButton::Start,
+            XButton::DpadUp,
+        ] {
+            assert_eq!(hold(button, 2, false), None, "{button:?}");
+        }
+        // While remapping every button is recorded; only B's hold stops it.
         assert_eq!(
-            hold_action(lb, 2),
-            Some((HoldAction::SwitchPad(-1), secs(1))),
-            "two pads"
+            hold(XButton::B, 2, true),
+            Some((HoldAction::StopRemap, secs(2)))
         );
+        assert_eq!(hold(XButton::Rt, 2, true), None);
+        assert_eq!(hold(XButton::Lb, 2, true), None);
+        assert_eq!(hold_action(99, 1, false), None);
+    }
+
+    #[test]
+    fn modes_cycle_both_ways() {
+        assert_eq!(Mode::Test.step(1), Mode::Focus);
+        assert_eq!(Mode::Focus.step(1), Mode::RemapAll);
+        assert_eq!(Mode::RemapAll.step(1), Mode::Test);
+        assert_eq!(Mode::Test.step(-1), Mode::RemapAll);
+    }
+
+    fn bit(button: XButton) -> u32 {
+        1 << index(button)
+    }
+
+    #[test]
+    fn remapping_replaces_instead_of_adding() {
+        let swap = BTreeMap::from([(XButton::A, XButton::B), (XButton::B, XButton::A)]);
+        let routes = routes(&swap);
+        assert_eq!(routes[index(XButton::A)], Some(XButton::B));
+        assert_eq!(routes[index(XButton::B)], Some(XButton::A));
+        assert_eq!(routes[index(XButton::X)], Some(XButton::X), "untouched");
+        // A given to X: the pad's A presses X only, and the pad's X presses nothing.
+        let one = BTreeMap::from([(XButton::X, XButton::A)]);
+        let routes = super::routes(&one);
+        assert_eq!(routes[index(XButton::A)], Some(XButton::X));
+        assert_eq!(routes[index(XButton::X)], None);
+    }
+
+    #[test]
+    fn the_glow_shows_what_the_game_gets() {
+        let mut profile = Profile::default();
+        profile.remap.insert(XButton::X, XButton::A);
+        profile.add(
+            XButton::L3,
+            Trigger::Key {
+                vk: 0x2D,
+                name: "Insert".into(),
+            },
+        );
+        let no_keys = |_| false;
         assert_eq!(
-            hold_action(index(XButton::DpadUp), 1),
-            None,
-            "directions navigate"
+            output_mask(&profile, bit(XButton::A), no_keys),
+            bit(XButton::X)
         );
-        assert_eq!(hold_action(index(XButton::LsLeft), 1), None);
-        assert_eq!(hold_action(99, 1), None);
+        assert_eq!(output_mask(&profile, bit(XButton::X), no_keys), 0);
+        assert_eq!(
+            output_mask(&profile, bit(XButton::Y), |vk| vk == 0x2D),
+            bit(XButton::Y) | bit(XButton::L3)
+        );
+    }
+
+    #[test]
+    fn remap_all_records_on_release_and_can_go_back() {
+        let mut remap = BTreeMap::new();
+        let mut run = RemapRun::new(vec![XButton::A, XButton::B, XButton::X], Mode::Test);
+        assert_eq!(run.target(), Some(XButton::A));
+        run.press(XButton::B);
+        assert_eq!(run.target(), Some(XButton::A), "nothing until let go");
+        assert_eq!(
+            run.release(XButton::B, &mut remap),
+            Some(RemapEvent::Assigned {
+                target: XButton::A,
+                source: XButton::B
+            })
+        );
+        // The same input can't press two buttons.
+        run.press(XButton::B);
+        assert_eq!(
+            run.release(XButton::B, &mut remap),
+            Some(RemapEvent::AlreadyUsed {
+                source: XButton::B,
+                by: XButton::A
+            })
+        );
+        run.press(XButton::A);
+        run.release(XButton::A, &mut remap);
+        assert_eq!(
+            remap,
+            BTreeMap::from([(XButton::A, XButton::B), (XButton::B, XButton::A)])
+        );
+        run.back(&mut remap);
+        assert_eq!(run.target(), Some(XButton::B));
+        assert_eq!(remap, BTreeMap::from([(XButton::A, XButton::B)]));
+        run.skip(&remap);
+        // Pressing a button's own input keeps it as it is (no entry).
+        run.press(XButton::X);
+        run.release(XButton::X, &mut remap);
+        assert_eq!(run.target(), None, "finished");
+        assert_eq!(remap, BTreeMap::from([(XButton::A, XButton::B)]));
+    }
+
+    #[test]
+    fn a_stick_moved_for_a_button_is_asked_about() {
+        let mut remap = BTreeMap::new();
+        let mut run = RemapRun::new(vec![XButton::A, XButton::LsUp], Mode::Test);
+        run.press(XButton::LsRight);
+        assert_eq!(
+            run.release(XButton::LsRight, &mut remap),
+            Some(RemapEvent::AskStick {
+                source: XButton::LsRight
+            })
+        );
+        run.retry();
+        assert!(remap.is_empty());
+        // A button pressed while the stick was nudged wins.
+        run.press(XButton::LsRight);
+        run.press(XButton::X);
+        assert_eq!(run.release(XButton::LsRight, &mut remap), None);
+        run.release(XButton::X, &mut remap);
+        assert_eq!(remap, BTreeMap::from([(XButton::A, XButton::X)]));
+        // For a stick direction, the stick is expected.
+        run.press(XButton::LsUp);
+        run.release(XButton::LsUp, &mut remap);
+        assert_eq!(run.target(), None);
+        // "Use it" records the stick.
+        let mut run = RemapRun::new(vec![XButton::A], Mode::Focus);
+        run.press(XButton::RsDown);
+        run.release(XButton::RsDown, &mut remap);
+        run.use_stick(&mut remap);
+        assert_eq!(remap, BTreeMap::from([(XButton::A, XButton::RsDown)]));
     }
 
     #[test]

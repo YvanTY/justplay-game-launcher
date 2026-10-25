@@ -213,4 +213,47 @@ mod tests {
         assert!(is_xbox(SDL_GAMEPAD_TYPE_XBOXONE));
         assert!(!is_xbox(SDL_GAMEPAD_TYPE_STANDARD));
     }
+
+    /// A stand-in pad for trying the Controllers screen without a real one: plugs in a virtual
+    /// Xbox pad and plays the script at `PAD_SCRIPT`, one step per line: inputs joined by `+`
+    /// (or `none`) and how long to hold them in ms, e.g. `rt 1300` or `a+lsright 200`.
+    /// `$env:PAD_SCRIPT = "..."; cargo test test_pad -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn test_pad() {
+        let script = std::fs::read_to_string(std::env::var("PAD_SCRIPT").unwrap()).unwrap();
+        let mut pad = VirtualPad::connect().unwrap();
+        std::thread::sleep(std::time::Duration::from_secs(2));
+        for line in script.lines().filter(|l| !l.trim().is_empty()) {
+            let (inputs, ms) = line.trim().rsplit_once(' ').unwrap();
+            let mut report = XGamepad::default();
+            for input in inputs.split('+') {
+                match input {
+                    "none" => {}
+                    "a" => report.buttons.raw |= XButtons::A,
+                    "b" => report.buttons.raw |= XButtons::B,
+                    "x" => report.buttons.raw |= XButtons::X,
+                    "y" => report.buttons.raw |= XButtons::Y,
+                    "lb" => report.buttons.raw |= XButtons::LB,
+                    "rb" => report.buttons.raw |= XButtons::RB,
+                    "start" => report.buttons.raw |= XButtons::START,
+                    "back" => report.buttons.raw |= XButtons::BACK,
+                    "up" => report.buttons.raw |= XButtons::UP,
+                    "down" => report.buttons.raw |= XButtons::DOWN,
+                    "left" => report.buttons.raw |= XButtons::LEFT,
+                    "right" => report.buttons.raw |= XButtons::RIGHT,
+                    "lt" => report.left_trigger = 255,
+                    "rt" => report.right_trigger = 255,
+                    "lsright" => report.thumb_lx = 30_000,
+                    "lsup" => report.thumb_ly = 30_000,
+                    other => panic!("unknown input {other}"),
+                }
+            }
+            println!("{line}");
+            pad.send(report).unwrap();
+            std::thread::sleep(std::time::Duration::from_millis(ms.parse().unwrap()));
+        }
+        pad.send(XGamepad::default()).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(500));
+    }
 }
