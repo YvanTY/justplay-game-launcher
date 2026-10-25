@@ -5,7 +5,7 @@ export enum Action { up, down, left, right, confirm, back, options, tab-prev, ta
 export enum Zone { tabs, icons, actions, recent }
 
 // What a mouse click landed on; main.rs turns it into the same steps a controller would take.
-export enum Target { none, tab, gear, tile, play, more, recent, sheet-item, sheet-outside, dismiss, panel-tile, power-item, settings-row, settings-step, remap-row, hold-exit, add-row, art-thumb, remap-button, controller-mode, remap-command, keyboard-key, ask-quit, quit-choice, pad-chip }
+export enum Target { none, tab, gear, tile, play, more, recent, sheet-item, sheet-outside, dismiss, panel-tile, power-item, settings-row, settings-step, remap-row, hold-exit, add-row, art-thumb, remap-button, controller-mode, remap-command, keyboard-key, ask-quit, quit-choice, pad-chip, pad-move }
 
 // Mouse input for the whole window. The pointer only shows while the mouse is being used.
 export global Mouse {
@@ -1524,10 +1524,32 @@ export component AppWindow inherits Window {
                 background: i == pad-index ? #2d8cff : chip-hit.has-hover && Mouse.visible ? #ffffff2e : #ffffff12;
                 border-width: 1px;
                 border-color: i == pad-index ? transparent : #ffffff1f;
+                // Declared first, so the arrows drawn over it get their own clicks.
+                chip-hit := Hit {
+                    target: Target.pad-chip;
+                    a: i;
+                }
+
                 HorizontalLayout {
                     padding-left: 18 * u;
                     padding-right: 18 * u;
                     spacing: 10 * u;
+                    // The selected pad's arrows move it one player earlier or later.
+                    if i == pad-index && pad-views.length > 1: Rectangle {
+                        width: 30 * u;
+                        border-radius: 15 * u;
+                        background: left-hit.has-hover && Mouse.visible ? #ffffff40 : transparent;
+                        Glyph {
+                            text: "\u{E76B}";
+                            font-size: 16 * u;
+                        }
+
+                        left-hit := Hit {
+                            target: Target.pad-move;
+                            a: 0;
+                        }
+                    }
+
                     Text {
                         text: pad.number + "  " + pad.name;
                         font-size: 20 * u;
@@ -1541,11 +1563,21 @@ export component AppWindow inherits Window {
                         charging: pad.charging;
                         u: u;
                     }
-                }
 
-                chip-hit := Hit {
-                    target: Target.pad-chip;
-                    a: i;
+                    if i == pad-index && pad-views.length > 1: Rectangle {
+                        width: 30 * u;
+                        border-radius: 15 * u;
+                        background: right-hit.has-hover && Mouse.visible ? #ffffff40 : transparent;
+                        Glyph {
+                            text: "\u{E76C}";
+                            font-size: 16 * u;
+                        }
+
+                        right-hit := Hit {
+                            target: Target.pad-move;
+                            a: 1;
+                        }
+                    }
                 }
             }
 

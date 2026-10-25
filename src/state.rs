@@ -47,6 +47,8 @@ pub struct State {
     /// Game id -> the store trailer its music came from (None: no trailer found). Looked up
     /// once; the Choose art screen shows the one in use.
     pub music_lookups: BTreeMap<String, Option<u64>>,
+    /// Player order chosen on the Controllers screen (pad keys, player 1 first).
+    pub pad_order: Vec<String>,
     /// Game id -> Steam app id its art came from (None: no Steam app). Looked up once.
     pub art_lookups: HashMap<String, Option<u32>>,
     /// Version of the art lookup that filled `art_lookups`; a newer lookup retries the misses.

@@ -349,6 +349,8 @@ pub enum HoldAction {
     SwitchMode(isize),
     /// Show the previous (-1) or next (+1) connected pad.
     SwitchPad(isize),
+    /// Make the pad shown player 1 (the others keep their order after it).
+    MakePlayerOne,
 }
 
 /// The action for holding the pad input at `index` (in `ALL` order), and how long it takes.
@@ -364,6 +366,7 @@ pub fn hold_action(index: usize, pads: usize, remapping: bool) -> Option<(HoldAc
         XButton::Rt => (HoldAction::SwitchMode(1), second),
         XButton::Lb if pads > 1 => (HoldAction::SwitchPad(-1), second),
         XButton::Rb if pads > 1 => (HoldAction::SwitchPad(1), second),
+        XButton::Start if pads > 1 => (HoldAction::MakePlayerOne, second),
         _ => return None,
     })
 }
@@ -592,15 +595,16 @@ mod tests {
             Some((HoldAction::SwitchPad(1), secs(1)))
         );
         // No more hold-to-remap: other buttons only light up.
-        for button in [
-            XButton::A,
-            XButton::X,
-            XButton::Y,
-            XButton::Start,
-            XButton::DpadUp,
-        ] {
+        for button in [XButton::A, XButton::X, XButton::Y, XButton::DpadUp] {
             assert_eq!(hold(button, 2, false), None, "{button:?}");
         }
+        // Start held: this pad becomes player 1 (only with two pads or more).
+        assert_eq!(
+            hold(XButton::Start, 2, false),
+            Some((HoldAction::MakePlayerOne, secs(1)))
+        );
+        assert_eq!(hold(XButton::Start, 1, false), None);
+        assert_eq!(hold(XButton::Start, 2, true), None, "not while remapping");
         // While remapping every button is recorded; only B's hold stops it.
         assert_eq!(
             hold(XButton::B, 2, true),

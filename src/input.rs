@@ -45,6 +45,9 @@ pub struct PadInfo {
     pub guid: String,
     /// Wireless pads that report it; None for wired ones (and pads that don't say).
     pub battery: Option<Battery>,
+    /// Tells this physical pad apart (for the player order).
+    pub key: String,
+    rank: (usize, u32),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -55,6 +58,39 @@ pub struct Battery {
 
 /// How often battery levels are read again.
 const BATTERY_CHECK: Duration = Duration::from_secs(30);
+
+/// Player order chosen on the Controllers screen (pad keys, player 1 first). Pads not in it
+/// come after, in connection order.
+static PAD_ORDER: std::sync::LazyLock<std::sync::RwLock<Vec<String>>> =
+    std::sync::LazyLock::new(Default::default);
+
+pub fn set_pad_order(order: Vec<String>) {
+    if let Ok(mut current) = PAD_ORDER.write() {
+        *current = order;
+    }
+}
+
+/// Tells one physical pad from another of the same model: its device path (stable while it
+/// stays on the same port or pairing), else its name.
+fn pad_key(pad: *mut SDL_Gamepad) -> String {
+    let path = cstr(unsafe { SDL_GetGamepadPath(pad) });
+    if path.is_empty() {
+        cstr(unsafe { SDL_GetGamepadName(pad) })
+    } else {
+        path
+    }
+}
+
+/// Where a pad sorts: its place in the chosen order, then connection order (SDL ids grow).
+fn player_rank(pad: *mut SDL_Gamepad, id: u32) -> (usize, u32) {
+    let key = pad_key(pad);
+    let place = PAD_ORDER
+        .read()
+        .ok()
+        .and_then(|order| order.iter().position(|k| *k == key))
+        .unwrap_or(usize::MAX);
+    (place, id)
+}
 
 fn battery(pad: *mut SDL_Gamepad) -> Option<Battery> {
     let mut percent: std::ffi::c_int = -1;
@@ -568,8 +604,9 @@ impl<F: Fn(InputEvent)> Pads<F> {
             })
             .map(|(&id, &pad)| (id, pad))
             .collect();
-        // SDL ids grow with each connection, so this numbers players in connection order.
-        sources.sort_by_key(|&(id, _)| id);
+        // Virtual pads are plugged in this order, so player 1 is the first chosen on the
+        // Controllers screen, then the others in connection order.
+        sources.sort_by_key(|&(id, pad)| player_rank(pad, id));
 
         let before = self.virtual_pads.len();
         self.virtual_pads
@@ -678,9 +715,11 @@ impl<F: Fn(InputEvent)> Pads<F> {
                 name: cstr(unsafe { SDL_GetGamepadName(pad) }),
                 guid: self.guids.get(&id).cloned().unwrap_or_default(),
                 battery: battery(pad),
+                key: pad_key(pad),
+                rank: player_rank(pad, id),
             })
             .collect();
-        pads.sort_by_key(|pad| pad.id);
+        pads.sort_by_key(|pad| pad.rank);
         self.batteries = pads.iter().map(|p| (p.id, p.battery)).collect();
         self.batteries_read = Instant::now();
         (self.emit)(InputEvent::Pads(pads));
@@ -698,7 +737,12 @@ impl<F: Fn(InputEvent)> Pads<F> {
             .filter(|(id, _)| !self.own_pads.contains(id))
             .map(|(&id, &pad)| (id, battery(pad)))
             .collect();
-        now.sort_by_key(|(id, _)| *id);
+        let rank = |id: &u32| {
+            self.gamepads
+                .get(id)
+                .map_or((usize::MAX, *id), |&pad| player_rank(pad, *id))
+        };
+        now.sort_by_key(|(id, _)| rank(id));
         if now != self.batteries {
             self.emit_pads();
         }

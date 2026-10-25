@@ -446,6 +446,8 @@ fn main() -> Result<(), slint::PlatformError> {
         move || drain_controller_events(&weak.unwrap(), &mut app.borrow_mut())
     });
 
+    // The player order chosen on the Controllers screen, before the first pad is listed.
+    input::set_pad_order(app.borrow().home.state.pad_order.clone());
     input::spawn(move |event| {
         let weak = weak.clone();
         // Controllers-screen events carry data Slint callbacks can't, so they queue in a channel
@@ -737,6 +739,21 @@ fn click(ui: &AppWindow, app: &mut App, target: Target, a: usize, b: usize, step
                 app.pad_index = a;
                 play_sound(app, Sound::Tab);
                 sync_controllers_screen(ui, app);
+            }
+            Then::Nothing
+        }
+        // The arrows on the selected chip: move that pad one player earlier (0) or later (1).
+        Target::PadMove => {
+            if app.remap_run.is_none() && !app.capturing {
+                let from = app.pad_index;
+                let to = if a == 0 {
+                    from.checked_sub(1)
+                } else {
+                    Some(from + 1)
+                };
+                if let Some(to) = to {
+                    move_pad(ui, app, from, to);
+                }
             }
             Then::Nothing
         }
@@ -3647,6 +3664,10 @@ fn hold_tick(ui: &AppWindow, app: &mut App) {
             app.pad_index = nav::wrap_index(app.pad_index, app.pads.len(), delta);
             play_sound(app, Sound::Tab);
         }
+        controllers::HoldAction::MakePlayerOne => {
+            let from = app.pad_index;
+            move_pad(ui, app, from, 0);
+        }
     }
     push_menus(ui, app);
     sync_controllers_screen(ui, app);
@@ -3672,6 +3693,9 @@ fn show_hold(ui: &AppWindow, app: &App, hold: Option<(usize, controllers::HoldAc
         ),
         controllers::HoldAction::SwitchPad(_) => {
             format!("Keep holding {button} to show the other controller")
+        }
+        controllers::HoldAction::MakePlayerOne => {
+            format!("Keep holding {button} to make this controller player 1")
         }
     };
     ui.set_hold_text(text.into());
@@ -3760,6 +3784,45 @@ fn drain_controller_events(ui: &AppWindow, app: &mut App) {
             _ => {}
         }
     }
+    sync_controllers_screen(ui, app);
+}
+
+/// Moves the pad at `from` to player `to + 1`. The order is saved (pads not connected keep
+/// their place after the connected ones) and used from the next game on.
+fn move_pad(ui: &AppWindow, app: &mut App, from: usize, to: usize) {
+    let count = app.pads.len();
+    if from >= count || to >= count || from == to {
+        play_sound(app, Sound::Bump);
+        return;
+    }
+    let shown = app.pads.get(app.pad_index).map(|p| p.id);
+    let pad = app.pads.remove(from);
+    let name = pad.name.clone();
+    app.pads.insert(to, pad);
+    let connected: Vec<String> = app.pads.iter().map(|p| p.key.clone()).collect();
+    let state = &mut app.home.state;
+    let rest: Vec<String> = state
+        .pad_order
+        .iter()
+        .filter(|k| !connected.contains(k))
+        .cloned()
+        .collect();
+    state.pad_order = connected.into_iter().chain(rest).collect();
+    input::set_pad_order(state.pad_order.clone());
+    if let Err(e) = state.save(&app.state_path) {
+        app.toasts.show(ui, e);
+    }
+    app.pad_index = app
+        .pads
+        .iter()
+        .position(|p| Some(p.id) == shown)
+        .unwrap_or(to);
+    play_sound(app, Sound::Confirm);
+    app.toasts.show(
+        ui,
+        format!("{name} is player {} · from the next game you start", to + 1),
+    );
+    push_pad_status(ui, app);
     sync_controllers_screen(ui, app);
 }
 
