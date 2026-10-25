@@ -172,6 +172,8 @@ struct App {
     renaming: Option<(String, keyboard::Keyboard)>,
     /// Emulator setup: the emulator found, waiting for its games folder.
     pending_emulator: Option<(PathBuf, &'static emulators::Preset)>,
+    /// Looks every hour whether the daily update check is due.
+    update_timer: Timer,
 }
 
 fn main() -> Result<(), slint::PlatformError> {
@@ -297,6 +299,7 @@ fn main() -> Result<(), slint::PlatformError> {
         ps3_music_queued: HashSet::new(),
         renaming: None,
         pending_emulator: None,
+        update_timer: Timer::default(),
     }));
 
     {
@@ -486,17 +489,25 @@ fn main() -> Result<(), slint::PlatformError> {
             }
         }
     });
-    // A while after start, so it never competes with loading art: is a newer JustPlay out?
-    slint::Timer::single_shot(UPDATE_CHECK_DELAY, {
+    // Is a newer JustPlay out? Asked a while after start (never competing with loading art),
+    // then looked at every hour so a launcher left running for days still asks once a day.
+    let check_for_update = {
         let app = app.clone();
         move || {
-            let app = app.borrow();
-            let last = app.home.state.update_checked;
-            if unix_now().saturating_sub(last) >= update::CHECK_EVERY {
-                background::spawn_update_check(app.notifier.clone());
+            if let Ok(app) = app.try_borrow() {
+                let last = app.home.state.update_checked;
+                if unix_now().saturating_sub(last) >= update::CHECK_EVERY {
+                    background::spawn_update_check(app.notifier.clone());
+                }
             }
         }
-    });
+    };
+    slint::Timer::single_shot(UPDATE_CHECK_DELAY, check_for_update.clone());
+    app.borrow().update_timer.start(
+        TimerMode::Repeated,
+        Duration::from_secs(60 * 60),
+        check_for_update,
+    );
     let result = slint::run_event_loop_until_quit();
     restore_screens(&mut app.borrow_mut());
     result
@@ -876,6 +887,7 @@ fn apply_effects(ui: &AppWindow, app_rc: &Rc<RefCell<App>>, effects: &[Effect]) 
                 let game = &app.home.games[*game];
                 app.renaming = Some((game.id.clone(), keyboard::Keyboard::new(&game.title)));
                 app.home.sheet = None;
+                push_selection(ui, &mut app);
                 sync_keyboard(ui, &app);
             }
             Effect::Unavailable(game) => {
@@ -1282,6 +1294,7 @@ fn finish_keyboard(ui: &AppWindow, app: &mut App, outcome: Option<keyboard::Outc
             app.renaming = None;
             play_sound(app, Sound::Back);
             sync_keyboard(ui, app);
+            push_selection(ui, app);
         }
         Some(keyboard::Outcome::Done(text)) => {
             let id = app.renaming.take().map(|(id, _)| id);
@@ -1289,6 +1302,7 @@ fn finish_keyboard(ui: &AppWindow, app: &mut App, outcome: Option<keyboard::Outc
             if let Some(id) = id {
                 rename_game(ui, app, &id, text);
             }
+            push_selection(ui, app);
         }
     }
 }
@@ -1313,23 +1327,48 @@ fn rename_game(ui: &AppWindow, app: &mut App, id: &str, text: String) {
         play_sound(app, Sound::Back);
         return;
     }
+    // Art lives in a folder named after the title: two games with one name would share it.
+    let folder = |title: &str| library::safe_file_name(title).to_lowercase();
+    let others_named = |title: &str| {
+        app.home
+            .games
+            .iter()
+            .any(|g| g.id != id && folder(&g.title) == folder(title))
+    };
+    let art_dir = config::data_dir().join("art");
+    let from = art_dir.join(library::safe_file_name(&current));
+    let to = art_dir.join(library::safe_file_name(&wanted));
+    let same_folder = folder(&current) == folder(&wanted);
+    if others_named(&wanted) || (!same_folder && to.exists()) {
+        play_sound(app, Sound::Bump);
+        app.toasts.show(
+            ui,
+            format!("Another game already uses the name {wanted}: pick a different one"),
+        );
+        return;
+    }
+    // A folder shared with a same-named game (one title on two platforms) stays where it is.
+    let move_art = from.is_dir() && !same_folder && !others_named(&current);
     let state = &mut app.home.state;
+    let previous = state.renames.get(id).cloned();
     if wanted == original {
         state.renames.remove(id);
     } else {
         state.renames.insert(id.to_string(), wanted.clone());
     }
-    let art_dir = config::data_dir().join("art");
-    let from = art_dir.join(library::safe_file_name(&current));
-    let to = art_dir.join(library::safe_file_name(&wanted));
-    if from.is_dir()
-        && !to.exists()
-        && let Err(e) = std::fs::rename(&from, &to)
-    {
-        diag::log(&format!("art folder for {wanted} not moved: {e}"));
-    }
+    // Saved first, then the art follows; a folder that can't move undoes the rename.
     if let Err(e) = state.save(&app.state_path) {
+        restore_rename(state, id, previous);
         app.toasts.show(ui, e);
+        return;
+    }
+    if move_art && let Err(e) = std::fs::rename(&from, &to) {
+        restore_rename(state, id, previous);
+        let _ = state.save(&app.state_path);
+        app.toasts.show(
+            ui,
+            format!("Could not rename {current}: its art folder is in use ({e})"),
+        );
         return;
     }
     play_sound(app, Sound::Confirm);
@@ -1343,6 +1382,13 @@ fn rename_game(ui: &AppWindow, app: &mut App, id: &str, text: String) {
         format!("Renamed to {wanted}")
     };
     app.toasts.show(ui, message);
+}
+
+fn restore_rename(state: &mut state::State, id: &str, previous: Option<String>) {
+    match previous {
+        Some(title) => state.renames.insert(id.to_string(), title),
+        None => state.renames.remove(id),
+    };
 }
 
 /// Pushes the rename keyboard to the screen (or hides it).
@@ -2696,6 +2742,32 @@ fn emulator_folder_picked(ui: &AppWindow, app: &mut App, dir: &Path) -> Sound {
         app.toasts
             .show(ui, format!("{} is already set up", preset.name));
         show_emulators(app);
+        return Sound::Bump;
+    }
+    // One emulator per system: two Switch emulators on one folder would list every game twice.
+    let config_systems: Vec<String> = config::load(&config::data_dir())
+        .map(|c| {
+            let mut names: Vec<String> = c.systems.iter().map(|s| s.name.clone()).collect();
+            names.extend(c.rpcs3.map(|_| "PS3".to_string()));
+            names
+        })
+        .unwrap_or_default();
+    let taken = app
+        .home
+        .state
+        .added_systems
+        .iter()
+        .map(|s| s.name.as_str())
+        .chain(config_systems.iter().map(String::as_str))
+        .any(|name| name.eq_ignore_ascii_case(preset.system));
+    if taken {
+        app.toasts.show(
+            ui,
+            format!(
+                "A {} emulator is already set up: remove it first to use {}",
+                preset.system, preset.name
+            ),
+        );
         return Sound::Bump;
     }
     app.toasts.show(

@@ -3,7 +3,8 @@
 
 use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Child, Command};
+use std::time::{Duration, Instant};
 
 use super::{Snd0, iso, safe_file_name};
 
@@ -39,27 +40,48 @@ pub fn convert(source: &Snd0, out: &Path) -> Result<(), Failure> {
     std::fs::write(&input, bytes).map_err(|e| fail(format!("{e}")))?;
     // No console window flashes up over the launcher.
     const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-    let result = Command::new("ffmpeg")
-        .args(["-hide_banner", "-loglevel", "error", "-y", "-i"])
+    let started = Command::new("ffmpeg")
+        .args(["-hide_banner", "-loglevel", "quiet", "-y", "-i"])
         .arg(&input)
         .args(["-c:a", "flac", "-f", "flac"])
         .arg(&output)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
         .creation_flags(CREATE_NO_WINDOW)
-        .output();
-    let _ = std::fs::remove_file(&input);
-    let finished = match result {
+        .spawn();
+    let status = match started {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Err(Failure::NoFfmpeg),
         Err(e) => Err(fail(format!("ffmpeg could not start: {e}"))),
-        Ok(run) if !run.status.success() => Err(fail(format!(
-            "ffmpeg: {}",
-            String::from_utf8_lossy(&run.stderr).trim()
-        ))),
-        Ok(_) => std::fs::rename(&output, out).map_err(|e| fail(format!("{e}"))),
+        Ok(child) => wait_or_kill(child),
     };
+    let _ = std::fs::remove_file(&input);
+    let finished =
+        status.and_then(|()| std::fs::rename(&output, out).map_err(|e| fail(format!("{e}"))));
     if finished.is_err() {
         let _ = std::fs::remove_file(&output);
     }
     finished
+}
+
+/// A menu tune converts in a second or two; an ffmpeg still busy after this is stuck.
+const CONVERT_TIMEOUT: Duration = Duration::from_secs(60);
+
+fn wait_or_kill(mut child: Child) -> Result<(), Failure> {
+    let started = Instant::now();
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) if status.success() => return Ok(()),
+            Ok(Some(status)) => return Err(Failure::Other(format!("ffmpeg failed ({status})"))),
+            Ok(None) if started.elapsed() > CONVERT_TIMEOUT => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(Failure::Other("ffmpeg took too long".into()));
+            }
+            Ok(None) => std::thread::sleep(Duration::from_millis(100)),
+            Err(e) => return Err(Failure::Other(format!("ffmpeg: {e}"))),
+        }
+    }
 }
 
 #[cfg(test)]

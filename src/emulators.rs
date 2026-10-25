@@ -81,23 +81,35 @@ pub fn preset_for(exe: &Path) -> Option<&'static Preset> {
 }
 
 /// The emulator in `folder` (its own folder, or a "bin" folder inside), with its preset.
-/// Helper programs ("pcsx2-updater", "...-cli") are not the emulator.
+/// Helper programs ("pcsx2-updater", "DolphinTool", "PPSSPPHeadless") are not the emulator;
+/// a program named exactly like the emulator wins over its variants.
 pub fn find_in(folder: &Path) -> Option<(PathBuf, &'static Preset)> {
-    [folder.to_path_buf(), folder.join("bin")]
+    let stem = |path: &Path| {
+        path.file_stem()
+            .map(|n| n.to_string_lossy().to_lowercase())
+            .unwrap_or_default()
+    };
+    let mut found: Vec<(PathBuf, &'static Preset)> = [folder.to_path_buf(), folder.join("bin")]
         .iter()
         .filter_map(|dir| std::fs::read_dir(dir).ok())
         .flat_map(|entries| entries.flatten().map(|e| e.path()))
         .filter(|path| path.is_file())
         .filter(|path| {
-            let name = path
-                .file_stem()
-                .map(|n| n.to_string_lossy().to_lowercase())
-                .unwrap_or_default();
-            !["updater", "update", "cli", "cmd", "uninst", "crash"]
-                .iter()
-                .any(|helper| name.contains(helper))
+            let name = stem(path);
+            ![
+                "updater", "update", "cli", "cmd", "uninst", "crash", "tool", "headless",
+            ]
+            .iter()
+            .any(|helper| name.contains(helper))
         })
-        .find_map(|path| preset_for(&path).map(|preset| (path, preset)))
+        .filter_map(|path| preset_for(&path).map(|preset| (path, preset)))
+        .collect();
+    // Exact names first, then the shortest (the plain build before "-avx2" or "-dbg").
+    found.sort_by_key(|(path, preset)| {
+        let name = stem(path);
+        (!preset.exes.contains(&name.as_str()), name.len(), name)
+    });
+    found.into_iter().next()
 }
 
 /// What the system's config looks like once its games folder is known.
@@ -149,8 +161,9 @@ mod tests {
         std::fs::write(dir.join("readme.txt"), b"").unwrap();
         assert!(find_in(&dir).is_none(), "an updater isn't the emulator");
         std::fs::write(dir.join("bin").join("pcsx2-qt.exe"), b"").unwrap();
+        std::fs::write(dir.join("bin").join("pcsx2-qt-avx2.exe"), b"").unwrap();
         let (exe, preset) = find_in(&dir).unwrap();
-        assert_eq!(exe, dir.join("bin").join("pcsx2-qt.exe"));
+        assert_eq!(exe, dir.join("bin").join("pcsx2-qt.exe"), "the plain build");
         assert_eq!(preset.name, "PCSX2");
         let config = system(preset, exe, PathBuf::from(r"E:\Roms\PS2"));
         assert_eq!(config.name, "PS2");
