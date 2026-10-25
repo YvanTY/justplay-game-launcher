@@ -64,6 +64,8 @@ pub enum Effect {
     ChangeArt(usize),
     /// Open the on-screen keyboard to rename this game.
     Rename(usize),
+    /// B at the top of the home screen: "Quit JustPlay?".
+    AskQuit,
 }
 
 /// Everything a key press can change, compared before/after to pick a feedback sound.
@@ -326,7 +328,9 @@ impl Home {
             (Zone::Icons, Action::Right) => self.move_focus(1),
             (Zone::Icons, Action::PagePrev) => self.move_focus(-PAGE),
             (Zone::Icons, Action::PageNext) => self.move_focus(PAGE),
-            (Zone::Icons, Action::Up | Action::Back) => self.go(Zone::Tabs),
+            // At the top level, B asks whether to quit (deeper down it goes back up).
+            (Zone::Icons | Zone::Tabs, Action::Back) => vec![Effect::AskQuit],
+            (Zone::Icons, Action::Up) => self.go(Zone::Tabs),
             (Zone::Icons, Action::Down) if has_games => {
                 self.action = 0;
                 self.go(Zone::Actions)

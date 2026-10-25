@@ -5,7 +5,7 @@ export enum Action { up, down, left, right, confirm, back, options, tab-prev, ta
 export enum Zone { tabs, icons, actions, recent }
 
 // What a mouse click landed on; main.rs turns it into the same steps a controller would take.
-export enum Target { none, tab, gear, tile, play, more, recent, sheet-item, sheet-outside, dismiss, panel-tile, power-item, settings-row, settings-step, remap-row, hold-exit, add-row, art-thumb, remap-button, controller-mode, remap-command, keyboard-key }
+export enum Target { none, tab, gear, tile, play, more, recent, sheet-item, sheet-outside, dismiss, panel-tile, power-item, settings-row, settings-step, remap-row, hold-exit, add-row, art-thumb, remap-button, controller-mode, remap-command, keyboard-key, ask-quit, quit-choice }
 
 // Mouse input for the whole window. The pointer only shows while the mouse is being used.
 export global Mouse {
@@ -653,6 +653,8 @@ export component AppWindow inherits Window {
     // 0 none, 1 quick panel, 2 power, 3 settings, 4 controllers, 5 add games, 6 choose art
     in property <int> overlay;
     in property <int> panel-index;
+    // "Quit JustPlay?": 0 Quit, 1 Cancel.
+    in property <int> quit-index;
     in property <int> power-index;
     in property <int> settings-index;
     in property <[string]> settings-values;
@@ -1104,6 +1106,35 @@ export component AppWindow inherits Window {
             key: "LT/RT";
             label: "Jump";
             u: u;
+        }
+
+        // B at the top of the home screen quits (after asking); click it too.
+        if zone == Zone.icons || zone == Zone.tabs: Rectangle {
+            border-radius: 10 * u;
+            background: quit-hit.has-hover && Mouse.visible ? #ffffff1a : transparent;
+            HorizontalLayout {
+                padding-left: 6 * u;
+                padding-right: 6 * u;
+                spacing: 10 * u;
+                VerticalLayout {
+                    alignment: center;
+                    Badge {
+                        label: "B";
+                        u: u;
+                    }
+                }
+
+                Text {
+                    text: "Quit";
+                    color: #ffffffa6;
+                    font-size: 20 * u;
+                    vertical-alignment: center;
+                }
+            }
+
+            quit-hit := Hit {
+                target: Target.ask-quit;
+            }
         }
 
         ButtonHint {
@@ -2129,6 +2160,73 @@ export component AppWindow inherits Window {
             overflow: elide;
             horizontal-alignment: center;
             vertical-alignment: center;
+        }
+    }
+
+    // --- "Quit JustPlay?" ---
+    if overlay == 7: Rectangle {
+        background: #000000b0;
+        Hit {
+            target: Target.dismiss;
+        }
+
+        Rectangle {
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
+            width: 760 * u;
+            height: 330 * u;
+            border-radius: 24 * u;
+            background: #0f1522f7;
+            border-width: 1px;
+            border-color: #ffffff1a;
+            drop-shadow-blur: 50 * u;
+            drop-shadow-color: #00000080;
+            Hit { }
+
+            Text {
+                x: 48 * u;
+                y: 44 * u;
+                text: "Quit JustPlay?";
+                font-size: 40 * u;
+                font-weight: 600;
+                color: white;
+            }
+
+            Text {
+                x: 48 * u;
+                y: 108 * u;
+                width: parent.width - 96 * u;
+                text: "You can start JustPlay again any time from its shortcut.";
+                font-size: 22 * u;
+                color: #ffffff99;
+                wrap: word-wrap;
+            }
+
+            for choice[i] in ["Quit", "Cancel"]: Rectangle {
+                property <bool> focused: i == quit-index;
+                x: 48 * u + i * 340 * u;
+                y: parent.height - 120 * u;
+                width: 320 * u;
+                height: 72 * u;
+                border-radius: 36 * u;
+                background: focused ? (i == 0 ? #e5484d : #2d8cff) : choice-hit.has-hover && Mouse.visible ? #ffffff2e : #ffffff17;
+                animate background { duration: 100ms; }
+                Text {
+                    width: parent.width;
+                    height: parent.height;
+                    text: choice;
+                    font-size: 26 * u;
+                    font-weight: focused ? 600 : 400;
+                    color: white;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                }
+
+                choice-hit := Hit {
+                    target: Target.quit-choice;
+                    a: i;
+                }
+            }
         }
     }
 

@@ -729,6 +729,17 @@ fn click(ui: &AppWindow, app: &mut App, target: Target, a: usize, b: usize, step
             remap_command(ui, app, a);
             Then::Nothing
         }
+        // --- Quit ---
+        Target::AskQuit => {
+            app.menus.ask_quit();
+            play_sound(app, Sound::Confirm);
+            push_menus(ui, app);
+            Then::Nothing
+        }
+        Target::QuitChoice => {
+            app.menus.quit_focus = a.min(1);
+            Then::Action(Action::Confirm)
+        }
         // --- Rename keyboard ---
         Target::KeyboardKey => {
             let key = keyboard::caps().get(a).map(|cap| cap.key);
@@ -887,6 +898,11 @@ fn apply_effects(ui: &AppWindow, app_rc: &Rc<RefCell<App>>, effects: &[Effect]) 
             }
             Effect::Remove(game) => remove_game(ui, &mut app, *game),
             Effect::ChangeArt(game) => open_art_picker(ui, &mut app, *game),
+            Effect::AskQuit => {
+                app.menus.ask_quit();
+                play_sound(&app, Sound::Confirm);
+                push_menus(ui, &app);
+            }
             Effect::Rename(game) => {
                 let game = &app.home.games[*game];
                 app.renaming = Some((game.id.clone(), keyboard::Keyboard::new(&game.title)));
@@ -3891,9 +3907,11 @@ fn push_menus(ui: &AppWindow, app: &App) {
         Overlay::Controllers => 4,
         Overlay::AddGames => 5,
         Overlay::Art => 6,
+        Overlay::Quit => 7,
     });
     ui.set_panel_index(menus.panel_focus as i32);
     ui.set_power_index(menus.power_focus as i32);
+    ui.set_quit_index(menus.quit_focus as i32);
     ui.set_settings_index(menus.settings_focus as i32);
     let settings = app.home.state.settings;
     // Listing screens and sound outputs costs a few system calls: only while Settings is open.

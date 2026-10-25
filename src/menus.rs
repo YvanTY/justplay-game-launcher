@@ -14,6 +14,8 @@ pub enum Overlay {
     AddGames,
     /// The Choose art screen (opened from a game's menu, not the panel).
     Art,
+    /// "Quit JustPlay?" (B on the home screen).
+    Quit,
 }
 
 /// Quick panel tiles, laid out two per row.
@@ -93,6 +95,8 @@ pub struct Menus {
     pub panel_focus: usize,
     pub power_focus: usize,
     pub settings_focus: usize,
+    /// In "Quit JustPlay?": 0 Quit, 1 Cancel.
+    pub quit_focus: usize,
 }
 
 impl Menus {
@@ -102,7 +106,31 @@ impl Menus {
             panel_focus: 0,
             power_focus: 0,
             settings_focus: 0,
+            quit_focus: 1,
         }
+    }
+
+    /// Asks before quitting. Cancel is selected: B is often pressed by reflex, so B then A
+    /// must not close the launcher.
+    pub fn ask_quit(&mut self) {
+        self.overlay = Overlay::Quit;
+        self.quit_focus = 1;
+    }
+
+    fn handle_quit(&mut self, action: Action) -> Vec<MenuEffect> {
+        match action {
+            Action::Left | Action::Up => self.quit_focus = 0,
+            Action::Right | Action::Down => self.quit_focus = 1,
+            Action::Back => self.overlay = Overlay::None,
+            Action::Confirm => {
+                self.overlay = Overlay::None;
+                if self.quit_focus == 0 {
+                    return vec![MenuEffect::Exit];
+                }
+            }
+            _ => {}
+        }
+        Vec::new()
     }
 
     pub fn is_open(&self) -> bool {
@@ -129,6 +157,7 @@ impl Menus {
             Overlay::Panel => self.handle_panel(action),
             Overlay::Power => self.handle_power(action),
             Overlay::Settings => self.handle_settings(action),
+            Overlay::Quit => self.handle_quit(action),
             // These screens have their own logic; this only covers leaving them.
             Overlay::Controllers | Overlay::AddGames | Overlay::Art => {
                 if action == Action::Back {
@@ -290,6 +319,24 @@ mod tests {
         menus.power_focus = 3; // Cancel
         assert!(menus.handle(Action::Confirm).is_empty());
         assert_eq!(menus.overlay, Overlay::Panel);
+    }
+
+    #[test]
+    fn quitting_asks_first_and_cancel_is_selected() {
+        let mut menus = Menus::new();
+        menus.ask_quit();
+        assert_eq!(menus.overlay, Overlay::Quit);
+        assert!(
+            menus.handle(Action::Confirm).is_empty(),
+            "A right away cancels"
+        );
+        assert_eq!(menus.overlay, Overlay::None);
+        menus.ask_quit();
+        menus.handle(Action::Back);
+        assert_eq!(menus.overlay, Overlay::None);
+        menus.ask_quit();
+        menus.handle(Action::Left);
+        assert_eq!(menus.handle(Action::Confirm), [MenuEffect::Exit]);
     }
 
     #[test]
