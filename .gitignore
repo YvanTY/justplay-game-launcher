@@ -12,3 +12,7 @@
 /vendor/SDL3/lib/x64/*
 !/vendor/SDL3/lib/x64/SDL3.dll
 !/vendor/SDL3/lib/x64/SDL3.lib
+
+# Release builds and the downloaded ViGEmBus installer (packaging\build-release.ps1)
+/dist
+/packaging/redist

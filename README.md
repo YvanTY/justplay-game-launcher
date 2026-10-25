@@ -7,6 +7,17 @@ screen. Everything works from the couch with a gamepad: browsing your games, add
 choosing art, setting up controllers, picking the screen and the sound output. When a game
 starts, the launcher gets out of the way and uses almost nothing until you come back.
 
+## Download
+
+- **[JustPlay-Setup.exe](https://github.com/YvanTY/justplay-game-launcher/releases/latest/download/JustPlay-Setup.exe)**
+  (recommended): installs JustPlay with Start menu and desktop shortcuts, and offers the
+  ViGEmBus driver so any controller works in Xbox-only games.
+- **[JustPlay-portable.zip](https://github.com/YvanTY/justplay-game-launcher/releases/latest/download/JustPlay-portable.zip)**:
+  nothing to install; unzip anywhere and run `JustPlay.exe`.
+
+Windows 10 or 11, 64-bit. JustPlay isn't digitally signed yet, so Windows may show
+"Windows protected your PC" the first time: click **More info**, then **Run anyway**.
+
 ## Why it exists
 
 Launchers like Playnite start games well, but managing them with a controller means getting
@@ -44,10 +55,10 @@ on the wrong screen, sound coming out of the wrong speakers.
 - Windows 10 or 11, 64-bit
 - [ViGEmBus](https://github.com/nefarius/ViGEmBus/releases) for the virtual Xbox controller
   (optional: without it, games see your pad as it is)
-- To build: [Rust](https://rustup.rs) (stable, MSVC toolchain) and the Windows 10/11 SDK
-  (installed with the Visual Studio C++ build tools)
+- To build from source: [Rust](https://rustup.rs) (stable, MSVC toolchain) and the
+  Windows 10/11 SDK (installed with the Visual Studio C++ build tools)
 
-## Build and run
+## Build from source
 
 ```powershell
 git clone https://github.com/YvanTY/justplay-game-launcher.git
@@ -57,6 +68,8 @@ cargo build --release
 ```
 
 SDL3 is included in `vendor/` and copied next to the executable by the build.
+`.\packaging\build-release.ps1` builds both downloads into `dist\` (needs
+[Inno Setup 6](https://jrsoftware.org/isinfo.php) for the installer).
 
 ## Setting up your games
 
@@ -107,7 +120,9 @@ Keyboard: arrows, Enter, Esc, Tab, Page Up / Page Down, F1. Mouse: click, wheel,
 
 ## Built with
 
-[Rust](https://www.rust-lang.org) · [Slint](https://slint.dev) (UI) ·
+[![Made with Slint](https://raw.githubusercontent.com/slint-ui/slint/master/logo/MadeWithSlint-logo-whitebg.png)](https://slint.dev)
+
+[Rust](https://www.rust-lang.org) · [Slint](https://slint.dev) (UI, under the Slint Royalty-free License) ·
 [SDL3](https://libsdl.org) (controllers, zlib license) ·
 [ViGEm](https://github.com/nefarius/ViGEmBus) (virtual Xbox controller) ·
 [Symphonia](https://github.com/pdeljanov/Symphonia) (music)
