@@ -1,4 +1,4 @@
-# PRD — Game Launcher (working name)
+# PRD — JustPlay - Game Launcher
 
 ## Why
 Playnite launches games fine, but everything else (menus, settings, managing the library) is frustrating with a controller. This launcher is **controller-first**: anything you can do in it, you can do from the couch with a gamepad. It stays out of the way while a game is running.

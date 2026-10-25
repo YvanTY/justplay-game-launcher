@@ -68,7 +68,7 @@ fn session() -> Result<*mut c_void, Error> {
 unsafe fn open_session() -> usize {
     unsafe {
         let handle = WinHttpOpen(
-            wide("GameLauncher/0.2").as_ptr(),
+            wide("JustPlay/0.2").as_ptr(),
             WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY,
             null(),
             null(),

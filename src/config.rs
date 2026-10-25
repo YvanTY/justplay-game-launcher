@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-const DEFAULT_CONFIG: &str = r#"# Game Launcher settings. Paths use single quotes so backslashes stay as-is.
+const DEFAULT_CONFIG: &str = r#"# JustPlay - Game Launcher settings. Paths use single quotes so backslashes stay as-is.
 # Restart the launcher (or use Rescan library) after editing.
 
 # --- PC games ---------------------------------------------------------------
