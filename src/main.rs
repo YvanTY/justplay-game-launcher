@@ -1365,27 +1365,29 @@ fn game_screen_check(app: &mut App) {
     }
 }
 
-/// Where a starting game's sound goes: the output of the screen chosen for games (Some(Some)),
-/// back to the default output for a game the launcher routed before (Some(None)), or left as
-/// it is (None).
+/// Where a starting game's sound goes (Settings > Game sound): a chosen output, else the
+/// output of the screen chosen for games (Some(Some)); back to the default output for a game
+/// the launcher routed before (Some(None)); or left as it is (None).
 fn game_sound_target(app: &mut App, game: usize) -> Option<Option<String>> {
     let id = app.home.games[game].id.clone();
     let state = &mut app.home.state;
-    if let display::ScreenChoice::Screen(device) = &state.game_screen {
-        let Some(monitor) = display::monitor_name(device) else {
-            diag::log(&format!(
-                "{device} has no monitor name: its sound output can't be found"
-            ));
-            return None;
-        };
-        let outputs = sound_output::outputs();
-        let Some(output) = sound_output::for_monitor(&monitor, &outputs) else {
-            let names: Vec<&str> = outputs.iter().map(|o| o.name.as_str()).collect();
-            diag::log(&format!(
-                "no sound output named {monitor}; outputs: {names:?}"
-            ));
-            return None;
-        };
+    let outputs = sound_output::outputs();
+    let output = match &state.game_sound {
+        sound_output::SoundChoice::WindowsDefault => None,
+        sound_output::SoundChoice::WithScreen => screen_sound_output(&state.game_screen, &outputs),
+        sound_output::SoundChoice::Output { id: chosen, name } => {
+            match outputs.iter().find(|o| o.id == *chosen) {
+                Some(output) => Some(output.clone()),
+                None => {
+                    diag::log(&format!(
+                        "{name} isn't connected: game sound follows the game's screen"
+                    ));
+                    screen_sound_output(&state.game_screen, &outputs)
+                }
+            }
+        }
+    };
+    if let Some(output) = output {
         diag::log(&format!("game sound goes to {}", output.name));
         let target = output.id.clone();
         if !state.sound_routed.contains(&id) {
@@ -1408,6 +1410,30 @@ fn game_sound_target(app: &mut App, game: usize) -> Option<Option<String>> {
 /// A game process is tried this many times (one per check) before it is taken for one that
 /// never plays sound.
 const SOUND_TRIES: u32 = 40;
+
+/// The sound output of the screen chosen for games (the TV's HDMI sound), if it has one.
+fn screen_sound_output(
+    choice: &display::ScreenChoice,
+    outputs: &[sound_output::Output],
+) -> Option<sound_output::Output> {
+    let display::ScreenChoice::Screen(device) = choice else {
+        return None;
+    };
+    let Some(monitor) = display::monitor_name(device) else {
+        diag::log(&format!(
+            "{device} has no monitor name: its sound output can't be found"
+        ));
+        return None;
+    };
+    let output = sound_output::for_monitor(&monitor, outputs);
+    if output.is_none() {
+        let names: Vec<&str> = outputs.iter().map(|o| o.name.as_str()).collect();
+        diag::log(&format!(
+            "no sound output named {monitor}; outputs: {names:?}"
+        ));
+    }
+    output.cloned()
+}
 
 /// Routes the running game's processes not yet routed (see game_sound_target). Windows only
 /// accepts a process once it has opened its sound, so a refusal is tried again next check.
@@ -1956,6 +1982,11 @@ fn handle_menu_action(ui: &AppWindow, app: &mut App, action: Action) {
                         let screens = display::screens();
                         let state = &mut app.home.state;
                         state.game_screen = display::step(&state.game_screen, &screens, delta);
+                    }
+                    Setting::GameSound => {
+                        let outputs = sound_output::outputs();
+                        let state = &mut app.home.state;
+                        state.game_sound = state.game_sound.step(&outputs, delta);
                     }
                 }
                 apply_volumes(app);
@@ -3184,11 +3215,11 @@ fn push_menus(ui: &AppWindow, app: &App) {
     ui.set_power_index(menus.power_focus as i32);
     ui.set_settings_index(menus.settings_focus as i32);
     let settings = app.home.state.settings;
-    // Listing screens costs a few system calls: only while Settings is open.
-    let screens = if menus.overlay == Overlay::Settings {
-        display::screens()
+    // Listing screens and sound outputs costs a few system calls: only while Settings is open.
+    let (screens, outputs) = if menus.overlay == Overlay::Settings {
+        (display::screens(), sound_output::outputs())
     } else {
-        Vec::new()
+        (Vec::new(), Vec::new())
     };
     let values: Vec<SharedString> = menus::SETTINGS
         .iter()
@@ -3199,6 +3230,7 @@ fn push_menus(ui: &AppWindow, app: &App) {
                 display::describe(&app.home.state.launcher_screen, &screens).into()
             }
             Setting::GameScreen => display::describe(&app.home.state.game_screen, &screens).into(),
+            Setting::GameSound => app.home.state.game_sound.describe(&outputs).into(),
         })
         .collect();
     ui.set_settings_values(ModelRc::new(VecModel::from(values)));

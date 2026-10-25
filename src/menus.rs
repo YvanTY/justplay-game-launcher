@@ -58,13 +58,15 @@ pub enum Setting {
     MusicVolume,
     LauncherScreen,
     GameScreen,
+    GameSound,
 }
 
-pub const SETTINGS: [Setting; 4] = [
+pub const SETTINGS: [Setting; 5] = [
     Setting::SoundVolume,
     Setting::MusicVolume,
     Setting::LauncherScreen,
     Setting::GameScreen,
+    Setting::GameSound,
 ];
 
 #[derive(Debug, PartialEq, Eq)]

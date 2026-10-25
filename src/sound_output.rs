@@ -7,12 +7,56 @@
 use std::ffi::c_void;
 use std::ptr::{null, null_mut};
 
+use serde::{Deserialize, Serialize};
+
 use windows_sys::Win32::System::Com::{COINIT_MULTITHREADED, CoInitializeEx, CoUninitialize};
 use windows_sys::Win32::System::Registry::{
     HKEY, HKEY_LOCAL_MACHINE, KEY_READ, KEY_WOW64_64KEY, RRF_RT_REG_DWORD, RRF_RT_REG_SZ,
     RegCloseKey, RegEnumKeyExW, RegGetValueW, RegOpenKeyExW,
 };
 use windows_sys::core::GUID;
+
+/// Where games' sound goes (Settings).
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SoundChoice {
+    /// The output of the screen the game plays on (its HDMI sound), when it has one.
+    #[default]
+    WithScreen,
+    /// Left to Windows.
+    WindowsDefault,
+    /// One output (a headset, speakers), whatever the screen. Its name is kept to show it
+    /// while it is unplugged.
+    Output { id: String, name: String },
+}
+
+impl SoundChoice {
+    /// The choices Left/Right cycle through: the two above, then each connected output.
+    pub fn step(&self, outputs: &[Output], delta: i32) -> SoundChoice {
+        let mut list = vec![SoundChoice::WithScreen, SoundChoice::WindowsDefault];
+        list.extend(outputs.iter().map(|o| SoundChoice::Output {
+            id: o.id.clone(),
+            name: o.name.clone(),
+        }));
+        let index = list
+            .iter()
+            .position(|c| match (c, self) {
+                (SoundChoice::Output { id: a, .. }, SoundChoice::Output { id: b, .. }) => a == b,
+                _ => c == self,
+            })
+            .unwrap_or(0) as i32;
+        list[(index + delta).rem_euclid(list.len() as i32) as usize].clone()
+    }
+
+    pub fn describe(&self, outputs: &[Output]) -> String {
+        match self {
+            SoundChoice::WithScreen => "With the game's screen".into(),
+            SoundChoice::WindowsDefault => "Windows default".into(),
+            SoundChoice::Output { id, name } if outputs.iter().any(|o| o.id == *id) => name.clone(),
+            SoundChoice::Output { name, .. } => format!("{name} (not connected)"),
+        }
+    }
+}
 
 /// A sound output (render endpoint).
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -269,6 +313,23 @@ mod tests {
             id: format!("id-{name}"),
             name: name.into(),
         }
+    }
+
+    #[test]
+    fn sound_choices_cycle_through_every_output() {
+        let list = [output("Haut-parleur"), output("Headset")];
+        let headset = SoundChoice::Output {
+            id: "id-Headset".into(),
+            name: "Headset".into(),
+        };
+        let with_screen = SoundChoice::WithScreen;
+        assert_eq!(with_screen.step(&list, 1), SoundChoice::WindowsDefault);
+        assert_eq!(with_screen.step(&list, -1), headset);
+        assert_eq!(headset.step(&list, 1), SoundChoice::WithScreen);
+        assert_eq!(headset.describe(&list), "Headset");
+        // Unplugged: still shown, and Left/Right starts over from the first choice.
+        assert_eq!(headset.describe(&list[..1]), "Headset (not connected)");
+        assert_eq!(headset.step(&list[..1], 1), SoundChoice::WindowsDefault);
     }
 
     #[test]

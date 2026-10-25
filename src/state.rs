@@ -34,6 +34,8 @@ pub struct State {
     /// Games whose sound the launcher sent to a screen's output. Windows remembers that per
     /// program, so the next start on another screen puts them back on the default output.
     pub sound_routed: Vec<String>,
+    /// Where games' sound goes (Settings).
+    pub game_sound: crate::sound_output::SoundChoice,
     /// Game id -> Steam app id its art came from (None: no Steam app). Looked up once.
     pub art_lookups: HashMap<String, Option<u32>>,
     /// Version of the art lookup that filled `art_lookups`; a newer lookup retries the misses.
