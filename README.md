@@ -30,7 +30,9 @@ on the wrong screen, sound coming out of the wrong speakers.
 
 - **PS5-style home:** tabs per platform, a row of games, full-screen background art,
   the game's logo, recently played cards and per-game music. PS3 games play their own menu
-  music, as on the console (converted once with [ffmpeg](https://ffmpeg.org), if installed).
+  music, as on the console; other games get the soundtrack of their Steam trailer, and
+  Choose art lets you pick another trailer or no music (both need
+  [ffmpeg](https://ffmpeg.org) installed).
 - **All your games in one place:** PC games, PS3 games imported from RPCS3, and emulators set
   up from the launcher: pick the folder of PCSX2 (PS2), Ryujinx or yuzu (Switch), Dolphin
   (GameCube / Wii), DuckStation (PS1), PPSSPP (PSP) or Cemu (Wii U), then its games folder.
@@ -43,10 +45,12 @@ on the wrong screen, sound coming out of the wrong speakers.
   get a virtual Xbox controller driven by your pad, so Xbox-only games accept any pad.
 - **Controllers screen:** test every button, remap buttons (replace what a button does, or add
   a keyboard key to it), or remap the whole pad one button after another. A check catches a
-  stick moved by accident.
+  stick moved by accident. Choose which controller is player 1, 2 and so on, and see the
+  battery level of wireless controllers there and on the home screen.
 - **Screens:** choose the screen the launcher shows on and the screen games play on, or show
   the same picture on all screens. Games that insist on their own monitor are moved to the
-  chosen one, and your screen layout is restored afterwards.
+  chosen one, and your screen layout is restored afterwards. If that screen is unplugged,
+  everything goes to the main screen until it's back.
 - **Sound:** a game's sound follows its screen (the TV's speakers for a game on the TV), or
   goes to an output you choose, such as a headset. Other apps keep their sound where it was.
 - **Light:** about 0% CPU when idle; while a game runs the launcher stops drawing and frees
@@ -106,7 +110,7 @@ steamgriddb_key = "your key"
 |---|---|
 | D-pad / left stick | Move |
 | A | Play / confirm |
-| B | Back |
+| B | Back (on the game row: quit, after asking) |
 | Y | Game options |
 | LB / RB | Previous / next tab |
 | LT / RT | Jump a page |

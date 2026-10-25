@@ -125,6 +125,11 @@ Yvan asked for: adding games from inside the launcher, drive scanning (external 
 13. **Rename games** (game menu → Rename): a controller on-screen keyboard (D-pad moves, A types, B deletes, Y shift, RB space, Start done; a physical keyboard types directly). Names are stored in `state.json` by game id; the art folder is moved to the new name; Done on an empty name restores the original.
 14. **Emulators from the launcher** (quick panel → Emulators): lists RPCS3 and config.toml's systems, plus "Add an emulator…": the folder browser picks the emulator's folder (PCSX2, Ryujinx, yuzu and forks, Dolphin, DuckStation, PPSSPP, Cemu are recognised by program name, with their usual full-screen command line and game extensions), then its games folder. Saved in `state.json` (`added_systems`); Y removes one (files untouched). The first-start welcome screen leads to Add games.
 
+15. **Trailer music.** Games without music (PC, emulator, and PS3 games without SND0) get the first 90 s of their main Steam trailer's soundtrack as `art\<title>\music.ogg`, fetched once in the background with ffmpeg (Steam app from the art lookup, else a title search; remembered in `music_lookups`). Choose art has a Music row: the trailers of each store match, and None (`music.none`, which also silences PS3 SND0).
+16. **Quit from home.** B on the game row or tab bar (or a click on "B Quit") asks "Quit JustPlay?" with Cancel selected.
+17. **Screens that aren't connected** count as the main screen (launch, window move, sound); the choice is kept for when the screen returns.
+18. **Controllers:** chips per pad on the Controllers screen (click to show; LB/RB on a pad that isn't shown switches too, not during a remap); battery of wireless pads (SDL power info, every 30 s) on the chips and in the home top bar; player order (hold Start, or the chip arrows) saved by device path and used to plug in the virtual Xbox pads at game start.
+
 **Left out on purpose:**
 - *Video trailers:* playing video needs a decoder pipeline (Media Foundation or ffmpeg) and costs real CPU/GPU while browsing, against the launcher's first goal (lightweight). Yvan said it was fine to skip if difficult.
 - *Automatic music:* there is no free, keyless source of per-game music. Dropping a file in `art\<title>\` still works.
