@@ -117,6 +117,9 @@ Yvan asked for: adding games from inside the launcher, drive scanning (external 
 8. **Choose art (game menu → Change art).** Three rows (cover, background, logo) of every picture found: the art in use, Steam images for the best store matches, screenshots, the banner, PCGamingWiki's cover, and None. Previews are light versions downloaded in parallel; the picked one shows at once and its sharp version replaces it when it arrives. The same picture at two sizes is offered once (visual fingerprint). The first image ever replaced is kept in `_original`; None writes a `<slot>.none` marker that automatic art respects (no logo shows the title, no background a plain backdrop).
 9. **Mouse.** Hidden while a pad or keyboard is used, shown when the mouse moves. Click selects, clicking the selection activates it (a stray click never launches a game); buttons and menu items act at once; right click goes back; the wheel scrolls; every button hint is clickable.
 
+**Later additions (asked for by Yvan):**
+10. **PS3 menu music.** A PS3 game's own `SND0.AT3` (the tune its XMB icon plays) becomes its music when none is set: from the game folder, or read straight out of an ISO image (`PS3_GAME/SND0.AT3`, a minimal ISO 9660 reader). ATRAC3 isn't something the launcher's decoder plays, so ffmpeg (when installed) converts it once, in the background, to FLAC in `cache\music\`; later starts play the cached file at once. Without ffmpeg, PS3 games keep the ambient music. Music in `art\<title>\` still wins.
+
 **Left out on purpose:**
 - *Video trailers:* playing video needs a decoder pipeline (Media Foundation or ffmpeg) and costs real CPU/GPU while browsing, against the launcher's first goal (lightweight). Yvan said it was fine to skip if difficult.
 - *Automatic music:* there is no free, keyless source of per-game music. Dropping a file in `art\<title>\` still works.

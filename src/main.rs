@@ -163,6 +163,8 @@ struct App {
     /// many routing tries were refused (None once routed).
     sound_target: Option<Option<String>>,
     sound_pids: HashMap<u32, Option<u32>>,
+    /// PS3 games whose menu music was queued for conversion this session (tried once each).
+    ps3_music_queued: HashSet<String>,
 }
 
 fn main() -> Result<(), slint::PlatformError> {
@@ -285,6 +287,7 @@ fn main() -> Result<(), slint::PlatformError> {
         game_moves: 0,
         sound_target: None,
         sound_pids: HashMap::new(),
+        ps3_music_queued: HashSet::new(),
     }));
 
     {
@@ -300,6 +303,7 @@ fn main() -> Result<(), slint::PlatformError> {
         show_hero(&ui, &mut app);
         update_music(&app);
         queue_art_lookups(&mut app);
+        queue_ps3_music(&mut app);
         problems.append(&mut app.images.problems);
         for problem in &problems {
             diag::log(problem);
@@ -1108,6 +1112,17 @@ fn drain_background(ui: &AppWindow, app: &mut App) {
                     }
                 }
             }
+            background::Event::Ps3Music { id, result } => match result {
+                Ok(music) => {
+                    diag::log(&format!("PS3 menu music ready for {id}"));
+                    if let Some(game) = app.home.games.iter_mut().find(|g| g.id == id) {
+                        game.art.music = Some(music);
+                    }
+                    // Starts at once if that game is the one selected.
+                    update_music(app);
+                }
+                Err(e) => diag::log(&format!("PS3 menu music for {id}: {e}")),
+            },
             background::Event::Listing { dir, folders } => {
                 app.add_games.set_listing(&dir, folders);
                 sync_add_games_screen(ui, app);
@@ -1156,6 +1171,33 @@ fn hero_loaded(ui: &AppWindow, app: &mut App, path: PathBuf, pixels: Option<scal
         None if wanted => ui.set_has_hero(false),
         None => {}
     }
+}
+
+/// PS3 games with menu music (SND0.AT3) and no music yet get it converted in the background,
+/// once per session; the result is cached, so later starts play it at once.
+fn queue_ps3_music(app: &mut App) {
+    let data_dir = config::data_dir();
+    let jobs: Vec<(String, library::Snd0, PathBuf)> = app
+        .home
+        .games
+        .iter()
+        .filter(|g| g.art.music.is_none() && g.missing.is_none())
+        .filter(|g| !app.ps3_music_queued.contains(&g.id))
+        .filter_map(|g| {
+            let source = g.art.snd0.clone()?;
+            Some((
+                g.id.clone(),
+                source,
+                library::snd0::cached(&data_dir, &g.id),
+            ))
+        })
+        .collect();
+    if jobs.is_empty() {
+        return;
+    }
+    app.ps3_music_queued
+        .extend(jobs.iter().map(|(id, _, _)| id.clone()));
+    background::spawn_ps3_music(app.notifier.clone(), jobs);
 }
 
 /// PC games missing an icon, background or logo get one Steam lookup each; the answer is
@@ -3333,6 +3375,7 @@ fn reload_library(ui: &AppWindow, app: &mut App) -> Result<Vec<String>, String> 
     show_hero(ui, app);
     update_music(app);
     queue_art_lookups(app);
+    queue_ps3_music(app);
     Ok(library.warnings)
 }
 

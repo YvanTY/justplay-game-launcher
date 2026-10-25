@@ -5,7 +5,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use super::cache::Cache;
-use super::{Art, Game, Launch, drives, expand_args, sfo};
+use super::{Art, Game, Launch, Snd0, drives, expand_args, sfo};
 use crate::config::Rpcs3Config;
 
 /// Is `path` absent because its whole drive is unplugged (rather than deleted)?
@@ -162,6 +162,13 @@ fn push_game(
             logo: None,
             music: None,
             hero_off: false,
+            // Folder games have the file; disc images keep it inside.
+            snd0: first("SND0.AT3").map(Snd0::File).or_else(|| {
+                let iso = boot_path
+                    .extension()
+                    .is_some_and(|e| e.eq_ignore_ascii_case("iso"));
+                iso.then(|| Snd0::Iso(boot_path.to_path_buf()))
+            }),
         },
         // RPCS3 reads pads itself (Yvan configured his there).
         xinput: false,

@@ -9,6 +9,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
 
 use crate::AppWindow;
+use crate::library;
 use crate::library::discover::{self, Candidate, Known};
 use crate::library::find_image;
 use crate::scaled_art::{self, Kind, Pixels};
@@ -68,6 +69,11 @@ pub enum Event {
     },
     ScanDone {
         found: Vec<Candidate>,
+    },
+    /// A PS3 game's menu music was converted (`music`), or couldn't be (`error`).
+    Ps3Music {
+        id: String,
+        result: Result<PathBuf, String>,
     },
 }
 
@@ -690,6 +696,29 @@ pub fn spawn_art_upgrade(
 /// Checks whether greyed-out games' files are back. Off the UI thread: a disk that is dropping
 /// out (as Yvan's external drive did) can take seconds to answer. A drive can also come back
 /// without its letter ever disappearing, so watching the drive letters isn't enough.
+/// Converts PS3 menu music one game at a time: (game id, where SND0.AT3 is, the cache file).
+/// Without ffmpeg nothing can be converted, so the rest of the queue is dropped.
+pub fn spawn_ps3_music(notifier: Notifier, jobs: Vec<(String, library::Snd0, PathBuf)>) {
+    let spawned = std::thread::Builder::new()
+        .name("ps3-music".into())
+        .spawn(move || {
+            for (id, source, out) in jobs {
+                let result = match library::snd0::convert(&source, &out) {
+                    Ok(()) => Ok(out),
+                    Err(library::snd0::Failure::NoFfmpeg) => {
+                        crate::diag::log("ffmpeg not found: PS3 games keep the ambient music");
+                        return;
+                    }
+                    Err(library::snd0::Failure::Other(e)) => Err(e),
+                };
+                notifier.send(Event::Ps3Music { id, result });
+            }
+        });
+    if let Err(e) = spawned {
+        crate::diag::log(&format!("PS3 music conversion could not start: {e}"));
+    }
+}
+
 pub fn spawn_reach_check(notifier: Notifier, games: Vec<(String, Vec<PathBuf>)>) {
     let spawned = std::thread::Builder::new()
         .name("reach-check".into())

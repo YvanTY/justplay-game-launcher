@@ -4,8 +4,10 @@ mod cache;
 pub mod discover;
 pub mod drives;
 mod emulator;
+mod iso;
 mod rpcs3;
 mod sfo;
+pub mod snd0;
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -22,6 +24,16 @@ pub struct Art {
     pub music: Option<PathBuf>,
     /// "None" was chosen for the background: a plain backdrop, not the cover blown up.
     pub hero_off: bool,
+    /// A PS3 game's own menu music, converted in the background when no music is set.
+    pub snd0: Option<Snd0>,
+}
+
+/// Where a PS3 game's menu music (SND0.AT3, the tune its XMB icon plays) is.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Snd0 {
+    File(PathBuf),
+    /// Inside the game's disc image, at PS3_GAME/SND0.AT3.
+    Iso(PathBuf),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -152,6 +164,11 @@ pub fn load(config: &Config, added: &[PcGame], data_dir: &Path) -> Library {
     let art_dir = data_dir.join("art");
     for game in &mut games {
         apply_art_folder(game, &art_dir);
+        // A PS3 game's menu music converted on an earlier run; music in the art folder wins.
+        let converted = snd0::cached(data_dir, &game.id);
+        if game.art.music.is_none() && game.art.snd0.is_some() && converted.is_file() {
+            game.art.music = Some(converted);
+        }
     }
     games.sort_by_cached_key(|g| g.title.to_lowercase());
     Library {
@@ -184,6 +201,7 @@ fn pc_game(entry: &PcGame, removable: bool, warnings: &mut Vec<String>) -> Optio
             logo: entry.logo.clone(),
             music: None,
             hero_off: false,
+            snd0: None,
         },
         xinput: entry.xinput,
         requires: vec![entry.exe.clone()],

@@ -29,7 +29,8 @@ on the wrong screen, sound coming out of the wrong speakers.
 ## Features
 
 - **PS5-style home:** tabs per platform, a row of games, full-screen background art,
-  the game's logo, recently played cards and per-game music.
+  the game's logo, recently played cards and per-game music. PS3 games play their own menu
+  music, as on the console (converted once with [ffmpeg](https://ffmpeg.org), if installed).
 - **All your games in one place:** PC games, PS3 games imported from RPCS3, and any emulator
   you configure (PS2, Switch...). Add games from inside the launcher by scanning a drive or a
   folder. Games on an unplugged drive are greyed out and come back when the drive does.

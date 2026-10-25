@@ -63,6 +63,7 @@ pub fn scan(system: &SystemConfig, cache: &Cache, warnings: &mut Vec<String>) ->
             logo: find_image(dir, &format!("{stem}-logo")),
             music: None,
             hero_off: false,
+            snd0: None,
         });
         // The path inside the ROM folder keeps same-named ROMs in different subfolders apart.
         let relative = rom.strip_prefix(&system.roms).unwrap_or(&rom);
