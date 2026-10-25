@@ -10,6 +10,7 @@ mod controllers;
 mod diag;
 mod display;
 mod emulation;
+mod emulators;
 mod home;
 mod input;
 mod keyboard;
@@ -169,6 +170,8 @@ struct App {
     ps3_music_queued: HashSet<String>,
     /// The game being renamed (by id) and the on-screen keyboard typing its name.
     renaming: Option<(String, keyboard::Keyboard)>,
+    /// Emulator setup: the emulator found, waiting for its games folder.
+    pending_emulator: Option<(PathBuf, &'static emulators::Preset)>,
 }
 
 fn main() -> Result<(), slint::PlatformError> {
@@ -202,7 +205,12 @@ fn main() -> Result<(), slint::PlatformError> {
                 .steamgriddb_key
                 .clone()
                 .filter(|k| !k.trim().is_empty());
-            library::load(&config, &state.added_games, &state.renames, &data_dir)
+            library::load(
+                &with_added_systems(config, &state),
+                &state.added_games,
+                &state.renames,
+                &data_dir,
+            )
         }
         Err(e) => {
             problems.push(e);
@@ -214,12 +222,7 @@ fn main() -> Result<(), slint::PlatformError> {
         }
     };
     problems.extend(library.warnings.iter().cloned());
-    if library.games.is_empty() && problems.is_empty() {
-        problems.push(format!(
-            "No games yet: add them in {}",
-            data_dir.join("config.toml").display()
-        ));
-    }
+    // No games yet: the welcome screen offers to find them, so no warning is needed.
     let audio = match Audio::start() {
         Ok(audio) => Some(Rc::new(audio)),
         Err(e) => {
@@ -293,6 +296,7 @@ fn main() -> Result<(), slint::PlatformError> {
         sound_pids: HashMap::new(),
         ps3_music_queued: HashSet::new(),
         renaming: None,
+        pending_emulator: None,
     }));
 
     {
@@ -1249,6 +1253,12 @@ fn hero_loaded(ui: &AppWindow, app: &mut App, path: PathBuf, pixels: Option<scal
         None if wanted => ui.set_has_hero(false),
         None => {}
     }
+}
+
+/// config.toml's emulators plus the ones set up from the launcher.
+fn with_added_systems(mut config: config::Config, state: &state::State) -> config::Config {
+    config.systems.extend(state.added_systems.iter().cloned());
+    config
 }
 
 /// Runs one input on the rename keyboard (with a click sound when something changed) and
@@ -2209,6 +2219,7 @@ fn handle_menu_action(ui: &AppWindow, app: &mut App, action: Action) {
         match effect {
             MenuEffect::Rescan => rescan(ui, app),
             MenuEffect::FindGames => find_games_where_last_looked(app),
+            MenuEffect::ShowEmulators => show_emulators(app),
             MenuEffect::Exit => {
                 let _ = slint::quit_event_loop();
             }
@@ -2582,6 +2593,19 @@ fn handle_add_games_action(ui: &AppWindow, app: &mut App, action: Action) {
             push_menus(ui, app);
             Some(Sound::Back)
         }
+        Some(add_games::Effect::ShowEmulators) => {
+            show_emulators(app);
+            Some(Sound::Back)
+        }
+        Some(add_games::Effect::EmulatorFolder(dir)) => Some(emulator_folder_picked(ui, app, dir)),
+        Some(add_games::Effect::EmulatorGamesFolder(dir)) => {
+            Some(games_folder_picked(ui, app, dir.clone()))
+        }
+        Some(add_games::Effect::RemoveEmulator(program)) => {
+            let program = program.clone();
+            remove_emulator(ui, app, &program);
+            Some(Sound::Back)
+        }
         None if before.0 != after.0 => Some(if action == Action::Back {
             Sound::Back
         } else {
@@ -2598,6 +2622,145 @@ fn handle_add_games_action(ui: &AppWindow, app: &mut App, action: Action) {
         play_sound(app, sound);
     }
     sync_add_games_screen(ui, app);
+}
+
+/// The Emulators screen: PS3 (RPCS3) and the emulators from config.toml, those set up here
+/// (which Y removes), then "Add an emulator…".
+fn show_emulators(app: &mut App) {
+    app.pending_emulator = None;
+    let games = |system: &str| {
+        let count = app
+            .home
+            .games
+            .iter()
+            .filter(|g| g.platform == system)
+            .count();
+        match count {
+            1 => "1 game".to_string(),
+            n => format!("{n} games"),
+        }
+    };
+    let program = |path: &Path| {
+        path.file_name().map_or_else(
+            || path.display().to_string(),
+            |n| n.to_string_lossy().into_owned(),
+        )
+    };
+    let mut rows = Vec::new();
+    if let Ok(config) = config::load(&config::data_dir()) {
+        if let Some(rpcs3) = &config.rpcs3 {
+            let detail = format!(
+                "{} · {} · from config.toml",
+                program(&rpcs3.exe),
+                games("PS3")
+            );
+            rows.push(("PS3".to_string(), detail, rpcs3.exe.clone(), false));
+        }
+        for system in &config.systems {
+            let detail = format!(
+                "{} · {} · from config.toml",
+                program(&system.emulator),
+                games(&system.name)
+            );
+            rows.push((system.name.clone(), detail, system.emulator.clone(), false));
+        }
+    }
+    for system in &app.home.state.added_systems {
+        let detail = format!(
+            "{} · {} in {}",
+            program(&system.emulator),
+            games(&system.name),
+            system.roms.display()
+        );
+        rows.push((system.name.clone(), detail, system.emulator.clone(), true));
+    }
+    app.add_games.open_emulators(rows);
+}
+
+/// Emulator setup, step 1: is there an emulator JustPlay knows in this folder?
+fn emulator_folder_picked(ui: &AppWindow, app: &mut App, dir: &Path) -> Sound {
+    let Some((exe, preset)) = emulators::find_in(dir) else {
+        app.toasts.show(
+            ui,
+            "No emulator JustPlay knows here: pick the folder with PCSX2, Ryujinx, yuzu, Dolphin, DuckStation, PPSSPP or Cemu".into(),
+        );
+        return Sound::Bump;
+    };
+    if app
+        .home
+        .state
+        .added_systems
+        .iter()
+        .any(|s| s.emulator == exe)
+    {
+        app.toasts
+            .show(ui, format!("{} is already set up", preset.name));
+        show_emulators(app);
+        return Sound::Bump;
+    }
+    app.toasts.show(
+        ui,
+        format!(
+            "Found {} ({}) · now pick the folder with its games",
+            preset.name, preset.system
+        ),
+    );
+    app.pending_emulator = Some((exe, preset));
+    app.add_games.choose_games_folder(preset.system);
+    Sound::Confirm
+}
+
+/// Emulator setup, step 2: its games folder. The system is saved and its tab appears.
+fn games_folder_picked(ui: &AppWindow, app: &mut App, dir: PathBuf) -> Sound {
+    let Some((exe, preset)) = app.pending_emulator.take() else {
+        show_emulators(app);
+        return Sound::Bump;
+    };
+    let system = emulators::system(preset, exe, dir);
+    let name = system.name.clone();
+    app.home.state.added_systems.push(system);
+    if let Err(e) = app.home.state.save(&app.state_path) {
+        app.home.state.added_systems.pop();
+        app.toasts.show(ui, e);
+        return Sound::Bump;
+    }
+    if let Err(e) = reload_library(ui, app) {
+        app.toasts.show(ui, e);
+    }
+    let found = app.home.games.iter().filter(|g| g.platform == name).count();
+    let message = match found {
+        0 => format!(
+            "{name} is set up, but that folder has no {} games yet",
+            preset.extensions.join(" / ")
+        ),
+        1 => format!("{name} is set up · 1 game in your {name} tab"),
+        n => format!("{name} is set up · {n} games in your {name} tab"),
+    };
+    app.toasts.show(ui, message);
+    show_emulators(app);
+    Sound::Confirm
+}
+
+/// Takes out an emulator set up from the launcher. Its files and games are not touched.
+fn remove_emulator(ui: &AppWindow, app: &mut App, program: &Path) {
+    let state = &mut app.home.state;
+    let before = state.added_systems.len();
+    state.added_systems.retain(|s| s.emulator != program);
+    if state.added_systems.len() == before {
+        return;
+    }
+    if let Err(e) = state.save(&app.state_path) {
+        app.toasts.show(ui, e);
+        return;
+    }
+    if let Err(e) = reload_library(ui, app) {
+        app.toasts.show(ui, e);
+    }
+    app.toasts.show(
+        ui,
+        "Emulator removed (its files and games are untouched)".into(),
+    );
+    show_emulators(app);
 }
 
 fn add_found_game(ui: &AppWindow, app: &mut App, index: usize) {
@@ -2687,9 +2850,23 @@ fn sync_add_games_screen(ui: &AppWindow, app: &mut App) {
             screen.place_focus,
             "Every drive, one drive, or a folder you choose".to_string(),
         ),
+        add_games::Mode::Emulators => (
+            3,
+            "Emulators".to_string(),
+            place_rows(screen, "Open"),
+            screen.place_focus,
+            "Play PS2, Switch, GameCube and more: pick an emulator's folder, then its games folder"
+                .to_string(),
+        ),
         add_games::Mode::Browse(dir) => (
             2,
-            "Choose a folder".to_string(),
+            match &screen.purpose {
+                add_games::Purpose::Games => "Choose a folder".to_string(),
+                add_games::Purpose::EmulatorProgram => "Where is the emulator?".to_string(),
+                add_games::Purpose::EmulatorGames(system) => {
+                    format!("Where are your {system} games?")
+                }
+            },
             place_rows(screen, "Open"),
             screen.place_focus,
             match dir {
@@ -2709,6 +2886,12 @@ fn sync_add_games_screen(ui: &AppWindow, app: &mut App) {
     ui.set_add_scanning(screen.scanning);
     ui.set_add_status(status.into());
     ui.set_add_place(format!("Looking in {}", screen.place.describe()).into());
+    ui.set_add_use_label(screen.purpose.use_label().into());
+    ui.set_add_can_remove(
+        screen.mode == add_games::Mode::Emulators
+            && screen.places.get(screen.place_focus).map(|r| &r.kind)
+                == Some(&add_games::PlaceKind::System { removable: true }),
+    );
 }
 
 fn game_rows(screen: &add_games::AddGames) -> Vec<AddRow> {
@@ -2753,10 +2936,16 @@ fn place_rows(screen: &add_games::AddGames, open: &str) -> Vec<AddRow> {
             let (icon, action) = match row.kind {
                 // Segoe MDL2: magnifier, drive, folder.
                 add_games::PlaceKind::AllDrives => ("\u{E721}", "Look here"),
+                add_games::PlaceKind::LookHere if screen.purpose != add_games::Purpose::Games => {
+                    ("\u{E73E}", "Use")
+                }
                 add_games::PlaceKind::LookHere => ("\u{E721}", "Look here"),
                 add_games::PlaceKind::Drive => ("\u{EDA2}", open),
                 add_games::PlaceKind::Folder => ("\u{E8B7}", open),
                 add_games::PlaceKind::Browse => ("\u{E8B7}", "Browse"),
+                // Segoe MDL2: game pad, plus.
+                add_games::PlaceKind::System { .. } => ("\u{E7FC}", ""),
+                add_games::PlaceKind::AddEmulator => ("\u{E710}", "Set up"),
             };
             AddRow {
                 title: row.title.as_str().into(),
@@ -3596,6 +3785,7 @@ fn reload_library(ui: &AppWindow, app: &mut App) -> Result<Vec<String>, String> 
         .clone()
         .filter(|k| !k.trim().is_empty());
     let state = &app.home.state;
+    let config = with_added_systems(config, state);
     let library = library::load(&config, &state.added_games, &state.renames, &data_dir);
     for warning in &library.warnings {
         diag::log(warning);

@@ -702,6 +702,10 @@ export component AppWindow inherits Window {
     in property <string> add-status;
     // 0 results, 1 where to look, 2 folder browser
     in property <int> add-mode;
+    // The folder browser's "use this folder" label (games, an emulator, its games).
+    in property <string> add-use-label: "Look in this folder";
+    // Emulators list: the selected emulator was set up here, so Y removes it.
+    in property <bool> add-can-remove;
     in property <[ArtRow]> art-rows;
     in property <int> art-slot;
     in property <string> art-title;
@@ -1191,15 +1195,16 @@ export component AppWindow inherits Window {
                 { glyph: "\u{E713}", label: "Settings" },
                 { glyph: "\u{E7FC}", label: "Controllers" },
                 { glyph: "\u{ECCD}", label: "Add games" },
+                { glyph: "\u{E990}", label: "Emulators" },
                 { glyph: "\u{E72C}", label: "Rescan library" },
                 { glyph: "\u{E7E8}", label: "Power" },
                 { glyph: "\u{E8BB}", label: "Exit launcher" },
             ];
             for item[i] in items: PanelTile {
                 x: 56 * u + Math.mod(i, 2) * 264 * u;
-                y: 250 * u + Math.floor(i / 2) * 204 * u;
+                y: 240 * u + Math.floor(i / 2) * 184 * u;
                 width: 244 * u;
-                height: 184 * u;
+                height: 166 * u;
                 glyph: item.glyph;
                 label: item.label;
                 focused: i == panel-index;
@@ -1929,13 +1934,39 @@ export component AppWindow inherits Window {
 
             ButtonHint {
                 key: "Y";
-                label: "Look in this folder";
+                label: add-use-label;
                 u: u;
             }
 
             ButtonHint {
                 key: "B";
                 label: "Up";
+                u: u;
+            }
+        }
+
+        if add-mode == 3: HorizontalLayout {
+            x: margin;
+            y: root.height - 66 * u;
+            width: root.width - 2 * margin;
+            height: 46 * u;
+            alignment: end;
+            spacing: 30 * u;
+            ButtonHint {
+                key: "A";
+                label: "Choose";
+                u: u;
+            }
+
+            if add-can-remove: ButtonHint {
+                key: "Y";
+                label: "Remove";
+                u: u;
+            }
+
+            ButtonHint {
+                key: "B";
+                label: "Back";
                 u: u;
             }
         }

@@ -1,4 +1,4 @@
-//! The quick panel (Menu button) and the screens it opens: Power and Settings (the Controllers
+﻿//! The quick panel (Menu button) and the screens it opens: Power and Settings (the Controllers
 //! and Add games screens have their own logic). UI-free so the navigation can be unit-tested;
 //! main.rs mirrors it into the window.
 
@@ -22,15 +22,17 @@ pub enum PanelItem {
     Settings,
     Controllers,
     AddGames,
+    Emulators,
     Rescan,
     Power,
     Exit,
 }
 
-pub const PANEL: [PanelItem; 6] = [
+pub const PANEL: [PanelItem; 7] = [
     PanelItem::Settings,
     PanelItem::Controllers,
     PanelItem::AddGames,
+    PanelItem::Emulators,
     PanelItem::Rescan,
     PanelItem::Power,
     PanelItem::Exit,
@@ -76,6 +78,8 @@ pub enum MenuEffect {
     Rescan,
     /// The Add games screen opened: look for games on the drives.
     FindGames,
+    /// The Add games screen opened on the emulators.
+    ShowEmulators,
     Exit,
     Sleep,
     Restart,
@@ -165,6 +169,10 @@ impl Menus {
                         self.overlay = Overlay::AddGames;
                         vec![MenuEffect::FindGames]
                     }
+                    PanelItem::Emulators => {
+                        self.overlay = Overlay::AddGames;
+                        vec![MenuEffect::ShowEmulators]
+                    }
                     PanelItem::Rescan => {
                         self.overlay = Overlay::None;
                         vec![MenuEffect::Rescan]
@@ -236,16 +244,20 @@ mod tests {
     fn panel_grid_navigation_reaches_every_tile() {
         let mut menus = Menus::new();
         menus.open_panel();
+        // Rows: Settings Controllers / Add games Emulators / Rescan Power / Exit.
         menus.handle(Action::Right);
         assert_eq!(PANEL[menus.panel_focus], PanelItem::Controllers);
         menus.handle(Action::Down);
-        assert_eq!(PANEL[menus.panel_focus], PanelItem::Rescan);
+        assert_eq!(PANEL[menus.panel_focus], PanelItem::Emulators);
         menus.handle(Action::Down);
-        assert_eq!(PANEL[menus.panel_focus], PanelItem::Exit);
-        menus.handle(Action::Down);
-        assert_eq!(PANEL[menus.panel_focus], PanelItem::Exit);
-        menus.handle(Action::Left);
         assert_eq!(PANEL[menus.panel_focus], PanelItem::Power);
+        // Down from a full row onto the shorter last row lands on its last tile.
+        menus.handle(Action::Down);
+        assert_eq!(PANEL[menus.panel_focus], PanelItem::Exit);
+        menus.handle(Action::Down);
+        assert_eq!(PANEL[menus.panel_focus], PanelItem::Exit);
+        menus.handle(Action::Up);
+        assert_eq!(PANEL[menus.panel_focus], PanelItem::Rescan);
         menus.handle(Action::Up);
         menus.handle(Action::Up);
         assert_eq!(PANEL[menus.panel_focus], PanelItem::Settings);
@@ -257,7 +269,7 @@ mod tests {
     fn power_needs_a_second_deliberate_choice() {
         let mut menus = Menus::new();
         menus.open_panel();
-        menus.panel_focus = 4; // Power
+        menus.panel_focus = 5; // Power
         assert!(menus.handle(Action::Confirm).is_empty());
         assert_eq!(menus.overlay, Overlay::Power);
         menus.handle(Action::Down);
@@ -270,7 +282,7 @@ mod tests {
     fn cancel_and_back_return_to_the_panel() {
         let mut menus = Menus::new();
         menus.open_panel();
-        menus.panel_focus = 4; // Power
+        menus.panel_focus = 5; // Power
         menus.handle(Action::Confirm);
         menus.handle(Action::Back);
         assert_eq!(menus.overlay, Overlay::Panel);

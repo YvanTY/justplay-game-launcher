@@ -31,9 +31,11 @@ on the wrong screen, sound coming out of the wrong speakers.
 - **PS5-style home:** tabs per platform, a row of games, full-screen background art,
   the game's logo, recently played cards and per-game music. PS3 games play their own menu
   music, as on the console (converted once with [ffmpeg](https://ffmpeg.org), if installed).
-- **All your games in one place:** PC games, PS3 games imported from RPCS3, and any emulator
-  you configure (PS2, Switch...). Add games from inside the launcher by scanning a drive or a
-  folder. Games on an unplugged drive are greyed out and come back when the drive does.
+- **All your games in one place:** PC games, PS3 games imported from RPCS3, and emulators set
+  up from the launcher: pick the folder of PCSX2 (PS2), Ryujinx or yuzu (Switch), Dolphin
+  (GameCube / Wii), DuckStation (PS1), PPSSPP (PSP) or Cemu (Wii U), then its games folder.
+  Add PC games by scanning a drive or a folder. Rename any game with the on-screen keyboard.
+  Games on an unplugged drive are greyed out and come back when the drive does.
 - **Art found for you:** covers, backgrounds and logos from Steam, the Microsoft Store and
   PCGamingWiki, plus SteamGridDB with a free key. A picker lets you choose among many
   versions for each game.
@@ -50,6 +52,7 @@ on the wrong screen, sound coming out of the wrong speakers.
 - **Light:** about 0% CPU when idle; while a game runs the launcher stops drawing and frees
   its images.
 - **Mouse too:** click, scroll and right-click to go back, for when the pad is out of reach.
+- **Stays up to date:** checks once a day for a new version and offers it in Settings.
 
 ## Requirements
 
@@ -74,8 +77,9 @@ SDL3 is included in `vendor/` and copied next to the executable by the build.
 
 ## Setting up your games
 
-On first start, JustPlay creates `%APPDATA%\GameLauncher\config.toml` with commented examples.
-You can also add games from the launcher itself (quick panel > **Add games**).
+Everything can be done from the launcher: quick panel > **Add games** for PC games,
+**Emulators** for consoles. For anything else, JustPlay creates
+`%APPDATA%\GameLauncher\config.toml` with commented examples on first start.
 
 ```toml
 [[games]]

@@ -99,7 +99,8 @@ pub struct Rpcs3Config {
     pub args: String,
 }
 
-#[derive(Debug, Deserialize)]
+/// Also the shape of emulators set up from the launcher, which state.json stores.
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct SystemConfig {
     pub name: String,
@@ -108,6 +109,7 @@ pub struct SystemConfig {
     pub args: String,
     pub roms: PathBuf,
     pub extensions: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub art: Option<PathBuf>,
     #[serde(default)]
     pub xinput: bool,

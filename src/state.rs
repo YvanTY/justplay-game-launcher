@@ -42,6 +42,8 @@ pub struct State {
     pub update: Option<crate::update::Update>,
     /// Names the user gave games (game id -> title), applied over the scanned names.
     pub renames: BTreeMap<String, String>,
+    /// Emulators set up from the launcher (Emulators screen), next to config.toml's.
+    pub added_systems: Vec<crate::config::SystemConfig>,
     /// Game id -> Steam app id its art came from (None: no Steam app). Looked up once.
     pub art_lookups: HashMap<String, Option<u32>>,
     /// Version of the art lookup that filled `art_lookups`; a newer lookup retries the misses.

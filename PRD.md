@@ -120,6 +120,11 @@ Yvan asked for: adding games from inside the launcher, drive scanning (external 
 **Later additions (asked for by Yvan):**
 10. **PS3 menu music.** A PS3 game's own `SND0.AT3` (the tune its XMB icon plays) becomes its music when none is set: from the game folder, or read straight out of an ISO image (`PS3_GAME/SND0.AT3`, a minimal ISO 9660 reader). ATRAC3 isn't something the launcher's decoder plays, so ffmpeg (when installed) converts it once, in the background, to FLAC in `cache\music\`; later starts play the cached file at once. Without ffmpeg, PS3 games keep the ambient music. Music in `art\<title>\` still wins.
 
+11. **Background dimming** (Settings): a black layer over the background art, Off to 100% (at most 85% black).
+12. **Update notice.** Once a day, 15 s after start, the GitHub releases API is asked for the latest release; a newer version is announced once and offered at the bottom of Settings (Y opens its page). Offline costs nothing but a log line.
+13. **Rename games** (game menu → Rename): a controller on-screen keyboard (D-pad moves, A types, B deletes, Y shift, RB space, Start done; a physical keyboard types directly). Names are stored in `state.json` by game id; the art folder is moved to the new name; Done on an empty name restores the original.
+14. **Emulators from the launcher** (quick panel → Emulators): lists RPCS3 and config.toml's systems, plus "Add an emulator…": the folder browser picks the emulator's folder (PCSX2, Ryujinx, yuzu and forks, Dolphin, DuckStation, PPSSPP, Cemu are recognised by program name, with their usual full-screen command line and game extensions), then its games folder. Saved in `state.json` (`added_systems`); Y removes one (files untouched). The first-start welcome screen leads to Add games.
+
 **Left out on purpose:**
 - *Video trailers:* playing video needs a decoder pipeline (Media Foundation or ffmpeg) and costs real CPU/GPU while browsing, against the launcher's first goal (lightweight). Yvan said it was fine to skip if difficult.
 - *Automatic music:* there is no free, keyless source of per-game music. Dropping a file in `art\<title>\` still works.

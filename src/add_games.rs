@@ -59,6 +59,30 @@ pub enum Mode {
     Places,
     /// Inside the folder browser; None is the list of drives.
     Browse(Option<PathBuf>),
+    /// The emulators set up, and "Add an emulator…".
+    Emulators,
+}
+
+/// What the folder browser picks a folder for.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Purpose {
+    /// A place to look for PC games.
+    Games,
+    /// The folder an emulator lives in.
+    EmulatorProgram,
+    /// The folder with that emulator's games (the system's name, for the screen).
+    EmulatorGames(String),
+}
+
+impl Purpose {
+    /// The browser row and hint that use the folder being shown.
+    pub fn use_label(&self) -> &'static str {
+        match self {
+            Purpose::Games => "Look in this folder",
+            Purpose::EmulatorProgram => "The emulator is in this folder",
+            Purpose::EmulatorGames(_) => "The games are in this folder",
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -70,6 +94,12 @@ pub enum PlaceKind {
     Browse,
     /// In the browser: look in the folder being shown.
     LookHere,
+    /// An emulator that is set up (`path`: its program); `removable` when set up here.
+    System {
+        removable: bool,
+    },
+    /// Starts setting up an emulator.
+    AddEmulator,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -96,6 +126,14 @@ pub enum Effect {
     List(PathBuf),
     /// B on the results: leave the screen.
     Close,
+    /// The folder an emulator should be in (main looks for one it knows).
+    EmulatorFolder(PathBuf),
+    /// The folder with the emulator's games: the setup is complete.
+    EmulatorGamesFolder(PathBuf),
+    /// Take out the emulator set up from the launcher whose program this is.
+    RemoveEmulator(PathBuf),
+    /// Show the emulators again (main supplies the list).
+    ShowEmulators,
 }
 
 pub struct AddGames {
@@ -113,6 +151,7 @@ pub struct AddGames {
     recent: Vec<PathBuf>,
     /// The browser waits for a folder listing.
     pub listing: bool,
+    pub purpose: Purpose,
 }
 
 impl Default for AddGames {
@@ -128,12 +167,14 @@ impl Default for AddGames {
             place_focus: 0,
             recent: Vec::new(),
             listing: false,
+            purpose: Purpose::Games,
         }
     }
 }
 
 impl AddGames {
     pub fn start_scan(&mut self, place: Place) {
+        self.purpose = Purpose::Games;
         self.scanning = true;
         self.folders = 0;
         self.rows.clear();
@@ -171,6 +212,36 @@ impl AddGames {
             .iter()
             .filter(|r| r.status == Status::Added)
             .count()
+    }
+
+    /// The emulators set up (title, detail, program, set up here?), then "Add an emulator…".
+    pub fn open_emulators(&mut self, systems: Vec<(String, String, PathBuf, bool)>) {
+        let mut rows: Vec<PlaceRow> = systems
+            .into_iter()
+            .map(|(title, detail, program, removable)| PlaceRow {
+                kind: PlaceKind::System { removable },
+                path: Some(program),
+                title,
+                detail,
+            })
+            .collect();
+        rows.push(PlaceRow {
+            kind: PlaceKind::AddEmulator,
+            path: None,
+            title: "Add an emulator…".into(),
+            detail: "PCSX2, Ryujinx, yuzu, Dolphin, DuckStation, PPSSPP or Cemu".into(),
+        });
+        // Starts on "Add an emulator…": that's what this screen is opened for.
+        self.place_focus = rows.len() - 1;
+        self.places = rows;
+        self.mode = Mode::Emulators;
+        self.purpose = Purpose::Games;
+    }
+
+    /// Picks the emulator's games folder next (after its program was found).
+    pub fn choose_games_folder(&mut self, system: &str) -> Option<Effect> {
+        self.purpose = Purpose::EmulatorGames(system.to_string());
+        self.browse(None)
     }
 
     /// The list of places: every drive, the folders used before (`recent`), and the browser.
@@ -229,7 +300,7 @@ impl AddGames {
                 self.places = vec![PlaceRow {
                     kind: PlaceKind::LookHere,
                     path: Some(dir.clone()),
-                    title: "Look in this folder".into(),
+                    title: self.purpose.use_label().into(),
                     detail: dir.display().to_string(),
                 }];
                 Some(Effect::List(dir))
@@ -257,6 +328,36 @@ impl AddGames {
             Mode::Results => self.handle_results(action),
             Mode::Places => self.handle_places(action),
             Mode::Browse(dir) => self.handle_browse(action, dir),
+            Mode::Emulators => self.handle_emulators(action),
+        }
+    }
+
+    fn handle_emulators(&mut self, action: Action) -> Option<Effect> {
+        match action {
+            Action::Back => return Some(Effect::Close),
+            Action::Confirm => {
+                if self.places.get(self.place_focus)?.kind == PlaceKind::AddEmulator {
+                    self.purpose = Purpose::EmulatorProgram;
+                    return self.browse(None);
+                }
+            }
+            Action::Options => {
+                let row = self.places.get(self.place_focus)?;
+                if row.kind == (PlaceKind::System { removable: true }) {
+                    return row.path.clone().map(Effect::RemoveEmulator);
+                }
+            }
+            _ => self.move_place_focus(action),
+        }
+        None
+    }
+
+    /// The folder picked in the browser, for whatever it was picked for.
+    fn use_folder(&self, folder: PathBuf) -> Effect {
+        match self.purpose {
+            Purpose::Games => Effect::Scan(Place::Folder(folder)),
+            Purpose::EmulatorProgram => Effect::EmulatorFolder(folder),
+            Purpose::EmulatorGames(_) => Effect::EmulatorGamesFolder(folder),
         }
     }
 
@@ -320,18 +421,18 @@ impl AddGames {
                 Some(parent) => return self.browse(Some(parent.to_path_buf())),
                 // From a drive root (or the drive list) back to the places.
                 None if dir.is_some() => return self.browse(None),
+                // Picking for an emulator: back to the emulators.
+                None if self.purpose != Purpose::Games => return Some(Effect::ShowEmulators),
                 None => {
                     let recent = std::mem::take(&mut self.recent);
                     self.open_places(&recent);
                 }
             },
-            Action::Options => return dir.map(|d| Effect::Scan(Place::Folder(d))),
+            Action::Options => return dir.map(|d| self.use_folder(d)),
             Action::Confirm => {
                 let row = self.places.get(self.place_focus)?.clone();
                 match (row.kind, row.path) {
-                    (PlaceKind::LookHere, Some(path)) => {
-                        return Some(Effect::Scan(Place::Folder(path)));
-                    }
+                    (PlaceKind::LookHere, Some(path)) => return Some(self.use_folder(path)),
                     (_, Some(path)) => return self.browse(Some(path)),
                     _ => {}
                 }
@@ -501,6 +602,49 @@ mod tests {
         );
         screen.handle(Action::Back);
         assert_eq!(screen.mode, Mode::Results);
+    }
+
+    #[test]
+    fn emulators_are_set_up_with_the_browser_and_removed_with_y() {
+        let mut screen = screen();
+        let rpcs3 = PathBuf::from(r"E:\Emu\rpcs3.exe");
+        let pcsx2 = PathBuf::from(r"E:\Emu\PCSX2\pcsx2-qt.exe");
+        screen.open_emulators(vec![
+            ("PS3".into(), "RPCS3".into(), rpcs3, false),
+            ("PS2".into(), "PCSX2".into(), pcsx2.clone(), true),
+        ]);
+        assert_eq!(screen.mode, Mode::Emulators);
+        assert_eq!(screen.places.last().unwrap().kind, PlaceKind::AddEmulator);
+        assert_eq!(screen.place_focus, 2, "starts on Add an emulator");
+        // Only emulators set up here can be removed.
+        screen.handle(Action::Up);
+        assert_eq!(
+            screen.handle(Action::Options),
+            Some(Effect::RemoveEmulator(pcsx2))
+        );
+        screen.handle(Action::Up);
+        assert_eq!(screen.handle(Action::Options), None, "config.toml's stay");
+        // Adding one: the browser picks the emulator's folder, then its games folder.
+        screen.handle(Action::Down);
+        screen.handle(Action::Down);
+        assert_eq!(screen.handle(Action::Confirm), None);
+        assert_eq!(screen.mode, Mode::Browse(None));
+        let dir = std::env::temp_dir();
+        screen.browse(Some(dir.clone()));
+        assert_eq!(screen.places[0].title, "The emulator is in this folder");
+        assert_eq!(
+            screen.handle(Action::Confirm),
+            Some(Effect::EmulatorFolder(dir.clone()))
+        );
+        screen.choose_games_folder("PS2");
+        screen.browse(Some(dir.clone()));
+        assert_eq!(
+            screen.handle(Action::Options),
+            Some(Effect::EmulatorGamesFolder(dir))
+        );
+        // B from the drive list goes back to the emulators, not to the game places.
+        screen.browse(None);
+        assert_eq!(screen.handle(Action::Back), Some(Effect::ShowEmulators));
     }
 
     #[test]
