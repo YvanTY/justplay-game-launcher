@@ -1466,11 +1466,12 @@ export component AppWindow inherits Window {
             }
         }
 
-        // The remap in progress: what to press, and mouse buttons to go back, skip or stop.
+        // The remap in progress: what to press, and mouse buttons to go back, skip or stop. It sits
+        // over the picture's empty lower half, between the columns, so no row it lights is hidden.
         if run-active: Rectangle {
             x: (parent.width - self.width) / 2;
-            y: root.height - 290 * u;
-            width: 1180 * u;
+            y: picture-y + picture-h - self.height + 10 * u;
+            width: root.width - 2 * (margin + column-w + 24 * u);
             height: 200 * u;
             border-radius: 24 * u;
             background: #121a2bf7;
@@ -1484,16 +1485,16 @@ export component AppWindow inherits Window {
                 padding: 22 * u;
                 Text {
                     text: run-title;
-                    font-size: 30 * u;
+                    font-size: 25 * u;
                     font-weight: 600;
                     color: white;
                     horizontal-alignment: center;
-                    overflow: elide;
+                    wrap: word-wrap;
                 }
 
                 Text {
                     text: run-detail;
-                    font-size: 20 * u;
+                    font-size: 18 * u;
                     color: #ffffff99;
                     horizontal-alignment: center;
                 }
