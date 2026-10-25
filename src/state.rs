@@ -31,6 +31,9 @@ pub struct State {
     /// The screen layout the user had before the launcher changed it. Restored when the
     /// launcher closes, or at its next start if it was closed some other way.
     pub display_restore: Option<crate::display::Layout>,
+    /// Games whose sound the launcher sent to a screen's output. Windows remembers that per
+    /// program, so the next start on another screen puts them back on the default output.
+    pub sound_routed: Vec<String>,
     /// Game id -> Steam app id its art came from (None: no Steam app). Looked up once.
     pub art_lookups: HashMap<String, Option<u32>>,
     /// Version of the art lookup that filled `art_lookups`; a newer lookup retries the misses.

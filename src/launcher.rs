@@ -142,6 +142,15 @@ pub fn close(running: &Running) {
     }
 }
 
+/// The running game's processes: the one started plus everything running from its folder.
+pub fn game_pids(running: &Running) -> Vec<u32> {
+    let mut pids = processes_in(&running.dir);
+    if !pids.contains(&running.root_pid) {
+        pids.push(running.root_pid);
+    }
+    pids
+}
+
 /// The game's main window: the largest visible top-level window owned by one of its processes
 /// that is on a screen (or minimized). Games can keep hidden helper windows off every screen.
 pub fn game_window(running: &Running) -> Option<HWND> {
@@ -359,7 +368,13 @@ mod tests {
     fn move_game_window() {
         let script = std::env::var("STAND_IN_WINDOW").unwrap();
         let mut child = Command::new("powershell")
-            .args(["-NoProfile", "-WindowStyle", "Hidden", "-ExecutionPolicy", "Bypass"])
+            .args([
+                "-NoProfile",
+                "-WindowStyle",
+                "Hidden",
+                "-ExecutionPolicy",
+                "Bypass",
+            ])
             .args(["-File", &script])
             .spawn()
             .unwrap();

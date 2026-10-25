@@ -230,6 +230,11 @@ pub fn describe_window(window: HWND) -> String {
     )
 }
 
+/// The monitor's own name for a screen (`\\.\DISPLAY4` -> "TOSHIBA-TV"), if it reports one.
+pub fn monitor_name(device: &str) -> Option<String> {
+    friendly_names().remove(device)
+}
+
 /// Device name (`\\.\DISPLAY1`) -> the monitor's own name, from Windows' display configuration.
 fn friendly_names() -> HashMap<String, String> {
     let mut names: HashMap<String, String> = HashMap::new();

@@ -22,6 +22,7 @@ mod net;
 mod pcgw;
 mod scaled_art;
 mod sgdb;
+mod sound_output;
 mod state;
 mod steam;
 
@@ -158,6 +159,10 @@ struct App {
     game_screen_seen: Option<String>,
     game_screen_checks: u32,
     game_moves: u32,
+    /// Where the running game's sound goes (see game_sound_target), and per game process how
+    /// many routing tries were refused (None once routed).
+    sound_target: Option<Option<String>>,
+    sound_pids: HashMap<u32, Option<u32>>,
 }
 
 fn main() -> Result<(), slint::PlatformError> {
@@ -278,6 +283,8 @@ fn main() -> Result<(), slint::PlatformError> {
         game_screen_seen: None,
         game_screen_checks: 0,
         game_moves: 0,
+        sound_target: None,
+        sound_pids: HashMap::new(),
     }));
 
     {
@@ -1283,6 +1290,10 @@ fn start_game(ui: &AppWindow, app: &mut App, game: usize) {
             app.game_screen_seen = None;
             app.game_screen_checks = 0;
             app.game_moves = 0;
+            // Tried at once, then at each check until the game has opened its sound.
+            app.sound_target = game_sound_target(app, game);
+            app.sound_pids.clear();
+            route_game_sound(app);
             let weak = ui.as_weak();
             app.game_screen_timer
                 .start(TimerMode::Repeated, GAME_CHECK_EARLY, move || {
@@ -1317,15 +1328,18 @@ const GAME_MOVES: u32 = 3;
 
 /// While a game runs: logs where its window is (when that changes) and, if a screen was chosen
 /// for games and the game opened elsewhere (some pick their own monitor), moves it there.
+/// Game processes started since the last check get the game's sound output too.
 fn game_screen_check(app: &mut App) {
-    let Some(running) = &app.running else {
+    if app.running.is_none() {
         app.game_screen_timer.stop();
         return;
-    };
+    }
     app.game_screen_checks += 1;
     if app.game_screen_checks == GAME_EARLY_CHECKS {
         app.game_screen_timer.set_interval(GAME_CHECK_LATER);
     }
+    route_game_sound(app);
+    let Some(running) = &app.running else { return };
     let Some(window) = launcher::game_window(running) else {
         if app.game_screen_seen.as_deref() != Some("none") {
             diag::log("no game window on any screen yet");
@@ -1347,6 +1361,77 @@ fn game_screen_check(app: &mut App) {
         match display::move_to(window, target) {
             Ok(()) => diag::log(&format!("moved the game window to {target}")),
             Err(e) => diag::log(&e),
+        }
+    }
+}
+
+/// Where a starting game's sound goes: the output of the screen chosen for games (Some(Some)),
+/// back to the default output for a game the launcher routed before (Some(None)), or left as
+/// it is (None).
+fn game_sound_target(app: &mut App, game: usize) -> Option<Option<String>> {
+    let id = app.home.games[game].id.clone();
+    let state = &mut app.home.state;
+    if let display::ScreenChoice::Screen(device) = &state.game_screen {
+        let Some(monitor) = display::monitor_name(device) else {
+            diag::log(&format!(
+                "{device} has no monitor name: its sound output can't be found"
+            ));
+            return None;
+        };
+        let outputs = sound_output::outputs();
+        let Some(output) = sound_output::for_monitor(&monitor, &outputs) else {
+            let names: Vec<&str> = outputs.iter().map(|o| o.name.as_str()).collect();
+            diag::log(&format!(
+                "no sound output named {monitor}; outputs: {names:?}"
+            ));
+            return None;
+        };
+        diag::log(&format!("game sound goes to {}", output.name));
+        let target = output.id.clone();
+        if !state.sound_routed.contains(&id) {
+            state.sound_routed.push(id);
+            if let Err(e) = state.save(&app.state_path) {
+                diag::log(&e);
+            }
+        }
+        return Some(Some(target));
+    }
+    let index = state.sound_routed.iter().position(|g| *g == id)?;
+    state.sound_routed.remove(index);
+    if let Err(e) = state.save(&app.state_path) {
+        diag::log(&e);
+    }
+    diag::log("game sound goes back to the default output");
+    Some(None)
+}
+
+/// A game process is tried this many times (one per check) before it is taken for one that
+/// never plays sound.
+const SOUND_TRIES: u32 = 40;
+
+/// Routes the running game's processes not yet routed (see game_sound_target). Windows only
+/// accepts a process once it has opened its sound, so a refusal is tried again next check.
+fn route_game_sound(app: &mut App) {
+    let (Some(running), Some(target)) = (&app.running, &app.sound_target) else {
+        return;
+    };
+    for pid in launcher::game_pids(running) {
+        let refused = app.sound_pids.entry(pid).or_insert(Some(0));
+        let Some(tries) = *refused else { continue };
+        if tries >= SOUND_TRIES {
+            continue;
+        }
+        match sound_output::route(pid, target.clone()) {
+            Ok(()) => {
+                *refused = None;
+                diag::log(&format!("sound of process {pid} routed"));
+            }
+            Err(e) => {
+                if tries == 0 {
+                    diag::log(&format!("sound of process {pid} not routed yet: {e}"));
+                }
+                *refused = Some(tries + 1);
+            }
         }
     }
 }
