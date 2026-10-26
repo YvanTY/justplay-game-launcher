@@ -253,27 +253,34 @@ pub fn apply_art_folder(game: &mut Game, art_dir: &Path) {
     }
 }
 
-/// Makes trailer music (already saved as `music.ogg` in `dir`) the game's music, or turns music
-/// off with None: other music files move to `_previous`, so nothing is lost and none shadows it.
-pub fn set_music(dir: &Path, trailer: bool) -> Result<(), String> {
+/// Makes `staged` (a trailer's sound, made beside it) the game's `music.ogg`, or with None
+/// turns music off. The music there before moves to `_previous`, so nothing is lost and no
+/// other file shadows the new one. Returns the music file now in use.
+pub fn set_music(dir: &Path, staged: Option<&Path>) -> Result<Option<PathBuf>, String> {
     let fail = |e: std::io::Error| format!("Could not change the music in {}: {e}", dir.display());
     std::fs::create_dir_all(dir).map_err(fail)?;
     let marker = dir.join("music.none");
     for extension in ["mp3", "ogg", "flac", "wav"] {
         let file = dir.join(format!("music.{extension}"));
-        if !file.is_file() || (trailer && extension == "ogg") {
+        if !file.is_file() {
             continue;
         }
         let previous = dir.join("_previous");
         std::fs::create_dir_all(&previous).map_err(fail)?;
         std::fs::rename(&file, previous.join(format!("music.{extension}"))).map_err(fail)?;
     }
-    if trailer {
-        let _ = std::fs::remove_file(&marker);
-    } else {
-        std::fs::write(&marker, b"").map_err(fail)?;
+    match staged {
+        Some(staged) => {
+            let music = dir.join("music.ogg");
+            std::fs::rename(staged, &music).map_err(fail)?;
+            let _ = std::fs::remove_file(&marker);
+            Ok(Some(music))
+        }
+        None => {
+            std::fs::write(&marker, b"").map_err(fail)?;
+            Ok(None)
+        }
     }
-    Ok(())
 }
 
 /// The user chose "None" for this slot: automatic art must not fill it again.

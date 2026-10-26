@@ -101,15 +101,15 @@ pub fn step(current: &ScreenChoice, screens: &[Screen], delta: i32) -> ScreenCho
     list[next].clone()
 }
 
-/// What a choice means with the screens connected now: a chosen screen that isn't connected,
-/// or "All screens" with only one, falls back to the main screen. The choice itself is kept,
-/// so plugging the screen back in brings it back.
+/// What a choice means with the screens connected now: a chosen screen that isn't connected
+/// falls back to the main screen. The choice itself is kept, so plugging the screen back in
+/// brings it back. ("All screens" stays as it is: while screens are duplicated Windows lists
+/// them as one, so their count can't tell.)
 pub fn effective(choice: &ScreenChoice, screens: &[Screen]) -> ScreenChoice {
     match choice {
         ScreenChoice::Screen(device) if !screens.iter().any(|s| s.device == *device) => {
             ScreenChoice::Main
         }
-        ScreenChoice::Duplicate if screens.len() < 2 => ScreenChoice::Main,
         other => other.clone(),
     }
 }
@@ -122,7 +122,6 @@ pub fn describe(choice: &ScreenChoice, screens: &[Screen]) -> String {
             || "Main screen (chosen screen not connected)".into(),
             |s| s.name.clone(),
         ),
-        ScreenChoice::Duplicate if screens.len() < 2 => "Main screen (only one connected)".into(),
         ScreenChoice::Duplicate => "All screens (same picture)".into(),
     }
 }
@@ -506,12 +505,9 @@ mod tests {
             ScreenChoice::Main,
             "the TV is unplugged"
         );
+        // Duplicated screens are listed as one, so "All screens" can't be judged by count.
         assert_eq!(
             effective(&ScreenChoice::Duplicate, &one),
-            ScreenChoice::Main
-        );
-        assert_eq!(
-            effective(&ScreenChoice::Duplicate, &two),
             ScreenChoice::Duplicate
         );
         assert_eq!(

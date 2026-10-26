@@ -176,6 +176,8 @@ struct App {
     update_timer: Timer,
     /// Games whose trailer music was queued this session.
     music_queued: HashSet<String>,
+    /// Games whose picked trailer is being fetched.
+    music_picking: HashSet<String>,
 }
 
 fn main() -> Result<(), slint::PlatformError> {
@@ -303,6 +305,7 @@ fn main() -> Result<(), slint::PlatformError> {
         pending_emulator: None,
         update_timer: Timer::default(),
         music_queued: HashSet::new(),
+        music_picking: HashSet::new(),
     }));
 
     {
@@ -1254,48 +1257,12 @@ fn drain_background(ui: &AppWindow, app: &mut App) {
                 // Offline: asked again at the next start.
                 Err(e) => diag::log(&e),
             },
-            background::Event::TrailerMusic { id, result, picked } => match result {
-                Ok(found) => {
-                    let state = &mut app.home.state;
-                    state
-                        .music_lookups
-                        .insert(id.clone(), found.as_ref().map(|(_, trailer)| *trailer));
-                    if let Err(e) = state.save(&app.state_path) {
-                        diag::log(&e);
-                    }
-                    let Some((music, trailer)) = found else {
-                        continue;
-                    };
-                    if picked {
-                        let dir = music.parent().map(Path::to_path_buf).unwrap_or_default();
-                        if let Err(e) = library::set_music(&dir, true) {
-                            diag::log(&e);
-                        }
-                        app.toasts.show(ui, "Music ready".into());
-                    }
-                    if let Some(game) = app.home.games.iter_mut().find(|g| g.id == id) {
-                        game.art.music = Some(music);
-                    }
-                    // The Choose art screen marks the trailer now in use.
-                    if let Some(picker) = app.art_picker.as_mut().filter(|p| p.game == id) {
-                        let prefix = format!("{trailer} ");
-                        if let Some(index) = picker.choices[3]
-                            .iter()
-                            .position(|c| c.full.as_deref().is_some_and(|f| f.starts_with(&prefix)))
-                        {
-                            picker.applied(3, index);
-                        }
-                        sync_art_screen(ui, app);
-                    }
-                    update_music(app);
+            background::Event::TrailerMusic { id, result, picked } => {
+                if picked {
+                    app.music_picking.remove(&id);
                 }
-                Err(e) => {
-                    diag::log(&format!("trailer music for {id}: {e}"));
-                    if picked {
-                        app.toasts.show(ui, format!("Couldn't get the music: {e}"));
-                    }
-                }
-            },
+                trailer_music_arrived(ui, app, &id, result, picked);
+            }
             background::Event::Ps3Music { id, result } => match result {
                 Ok(music) => {
                     diag::log(&format!("PS3 menu music ready for {id}"));
@@ -2447,12 +2414,17 @@ fn open_art_picker(ui: &AppWindow, app: &mut App, game: usize) {
     if game.art.music.is_none() {
         picker.none_in_use(3);
     }
-    let music_in_use = app
-        .home
-        .state
-        .music_lookups
-        .get(&game.id)
-        .copied()
+    // A trailer shows as in use only while its sound is what plays.
+    let music_off = library::art_turned_off(&data_dir.join("art").join(&folder), "music");
+    let music_in_use = (game.art.music.is_some() && !music_off)
+        .then(|| {
+            app.home
+                .state
+                .music_lookups
+                .get(&game.id)
+                .copied()
+                .flatten()
+        })
         .flatten();
     app.art_sessions += 1;
     picker.session = format!("{}#{}", game.id, app.art_sessions);
@@ -2563,12 +2535,17 @@ fn apply_music(
     game_id: String,
 ) {
     let Some(full) = choice.full else {
-        if let Err(e) = library::set_music(&dir, false) {
+        if let Err(e) = library::set_music(&dir, None) {
             app.toasts.show(ui, e);
             return;
         }
         if let Some(picker) = app.art_picker.as_mut() {
             picker.applied(3, index);
+        }
+        // No trailer is in use any more (and none is fetched automatically again).
+        app.home.state.music_lookups.insert(game_id.clone(), None);
+        if let Err(e) = app.home.state.save(&app.state_path) {
+            diag::log(&e);
         }
         if let Some(game) = app.home.games.iter_mut().find(|g| g.id == game_id) {
             game.art.music = None;
@@ -2584,11 +2561,99 @@ fn apply_music(
     else {
         return;
     };
+    if !app.music_picking.insert(game_id.clone()) {
+        app.toasts
+            .show(ui, "Still getting the music for this game…".into());
+        return;
+    }
     app.toasts.show(
         ui,
         "Getting the music from the trailer… (about 15 seconds)".into(),
     );
     background::spawn_picked_trailer(app.notifier.clone(), game_id, trailer, stream, dir);
+}
+
+/// A trailer's sound arrived (staged beside music.ogg) or none was found. Automatic music that
+/// arrives after the user chose "None", picked a trailer, or got other music is dropped.
+fn trailer_music_arrived(
+    ui: &AppWindow,
+    app: &mut App,
+    id: &str,
+    result: Result<Option<(PathBuf, u64)>, String>,
+    picked: bool,
+) {
+    let found = match result {
+        Ok(found) => found,
+        Err(e) => {
+            diag::log(&format!("trailer music for {id}: {e}"));
+            if picked {
+                app.toasts.show(ui, format!("Couldn't get the music: {e}"));
+            }
+            return;
+        }
+    };
+    let Some((staged, trailer)) = found else {
+        // Nothing to offer: remembered, so the store isn't asked again.
+        app.home.state.music_lookups.insert(id.to_string(), None);
+        if let Err(e) = app.home.state.save(&app.state_path) {
+            diag::log(&e);
+        }
+        return;
+    };
+    let dir = staged.parent().map(Path::to_path_buf).unwrap_or_default();
+    let has_music = app
+        .home
+        .games
+        .iter()
+        .any(|g| g.id == id && g.art.music.is_some());
+    let superseded = !picked
+        && (library::art_turned_off(&dir, "music") || app.music_picking.contains(id) || has_music);
+    if superseded {
+        let _ = std::fs::remove_file(&staged);
+        return;
+    }
+    let music = match library::set_music(&dir, Some(&staged)) {
+        Ok(Some(music)) => music,
+        Ok(None) => return,
+        Err(e) => {
+            let _ = std::fs::remove_file(&staged);
+            diag::log(&e);
+            if picked {
+                app.toasts.show(ui, e);
+            }
+            return;
+        }
+    };
+    app.home
+        .state
+        .music_lookups
+        .insert(id.to_string(), Some(trailer));
+    if let Err(e) = app.home.state.save(&app.state_path) {
+        diag::log(&e);
+    }
+    if let Some(game) = app.home.games.iter_mut().find(|g| g.id == id) {
+        game.art.music = Some(music);
+        game.art.snd0 = None;
+    }
+    // The Choose art screen marks the trailer now in use.
+    if let Some(picker) = app.art_picker.as_mut().filter(|p| p.game == id) {
+        let prefix = format!("{trailer} ");
+        if let Some(index) = picker.choices[3]
+            .iter()
+            .position(|c| c.full.as_deref().is_some_and(|f| f.starts_with(&prefix)))
+        {
+            picker.applied(3, index);
+        }
+        sync_art_screen(ui, app);
+    }
+    if picked {
+        app.toasts.show(ui, "Music ready".into());
+    }
+    // The file keeps its name, so the player is told to start over to pick up the new sound.
+    if let Some(player) = &app.music {
+        player.play(None);
+    }
+    update_music(app);
 }
 
 /// PC games know their Steam app from the art lookup; other games are searched by title.
@@ -2602,6 +2667,8 @@ fn queue_trailer_music(app: &mut App) {
         .iter()
         .filter(|g| g.art.music.is_none() && g.art.snd0.is_none() && g.missing.is_none())
         .filter(|g| !state.music_lookups.contains_key(&g.id) && !app.music_queued.contains(&g.id))
+        // Its art lookup is still finding the right Steam page: next time.
+        .filter(|g| !app.art_pending.contains(&g.id))
         .filter_map(|g| {
             let dir = art_dir.join(library::safe_file_name(&g.title));
             if library::art_turned_off(&dir, "music") {
@@ -3730,7 +3797,12 @@ fn drain_controller_events(ui: &AppWindow, app: &mut App) {
             InputEvent::Pads(pads) => {
                 let shown = app.pads.get(app.pad_index).map(|p| p.id);
                 app.pads = pads;
-                app.pad_index = app.pad_index.min(app.pads.len().saturating_sub(1));
+                // The same pad stays shown when another connects or leaves.
+                app.pad_index = app
+                    .pads
+                    .iter()
+                    .position(|p| Some(p.id) == shown)
+                    .unwrap_or_else(|| app.pad_index.min(app.pads.len().saturating_sub(1)));
                 // The remap belongs to the pad that was shown.
                 if app.pads.get(app.pad_index).map(|p| p.id) != shown {
                     stop_remap(ui, app);

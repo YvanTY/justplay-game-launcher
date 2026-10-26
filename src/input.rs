@@ -71,13 +71,18 @@ pub fn set_pad_order(order: Vec<String>) {
 }
 
 /// Tells one physical pad from another of the same model: its device path (stable while it
-/// stays on the same port or pairing), else its name.
+/// stays on the same port or pairing), else its serial number, else its name.
 fn pad_key(pad: *mut SDL_Gamepad) -> String {
-    let path = cstr(unsafe { SDL_GetGamepadPath(pad) });
-    if path.is_empty() {
-        cstr(unsafe { SDL_GetGamepadName(pad) })
+    let path = cstr_or_empty(unsafe { SDL_GetGamepadPath(pad) });
+    if !path.is_empty() {
+        return path;
+    }
+    let name = cstr(unsafe { SDL_GetGamepadName(pad) });
+    let serial = cstr_or_empty(unsafe { SDL_GetGamepadSerial(pad) });
+    if serial.is_empty() {
+        name
     } else {
-        path
+        format!("{name} #{serial}")
     }
 }
 
@@ -755,7 +760,7 @@ impl<F: Fn(InputEvent)> Pads<F> {
             return;
         }
         for (&id, &pad) in &self.gamepads {
-            if id == live_id || self.own_pads.contains(&id) {
+            if self.own_pads.contains(&id) {
                 continue;
             }
             let held = |button| unsafe { SDL_GetGamepadButton(pad, button) };
@@ -763,7 +768,12 @@ impl<F: Fn(InputEvent)> Pads<F> {
                 held(SDL_GAMEPAD_BUTTON_LEFT_SHOULDER),
                 held(SDL_GAMEPAD_BUTTON_RIGHT_SHOULDER),
             );
+            // The pad shown is tracked too, so a hold that just switched away from it isn't
+            // taken for a fresh press once it becomes "another pad".
             let before = self.shoulders.insert(id, now).unwrap_or(now);
+            if id == live_id {
+                continue;
+            }
             if now.0 && !before.0 {
                 (self.emit)(InputEvent::OtherPadSwitch(-1));
             } else if now.1 && !before.1 {
@@ -1098,6 +1108,14 @@ fn cstr(ptr: *const c_char) -> String {
     unsafe { CStr::from_ptr(ptr) }
         .to_string_lossy()
         .into_owned()
+}
+
+/// Like `cstr`, but empty when SDL has nothing to say.
+fn cstr_or_empty(ptr: *const c_char) -> String {
+    if ptr.is_null() {
+        return String::new();
+    }
+    cstr(ptr)
 }
 
 #[cfg(test)]

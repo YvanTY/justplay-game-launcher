@@ -77,8 +77,8 @@ pub enum Event {
     },
     /// GitHub's latest release, newer or not.
     LatestRelease(Result<crate::update::Update, String>),
-    /// A game's music from its store trailer: saved (`Some(file, trailer)`), no trailer
-    /// found (`None`), or a failure worth trying again another time.
+    /// A game's music from its store trailer: staged (`Some(file, trailer)`, to be put in
+    /// place as music.ogg), no trailer found (`None`), or a failure worth trying again later.
     TrailerMusic {
         id: String,
         result: Result<Option<(PathBuf, u64)>, String>,
@@ -125,7 +125,9 @@ pub fn spawn_trailer_music(notifier: Notifier, jobs: Vec<MusicJob>) {
                     });
                     continue;
                 };
-                let out = job.dir.join("music.ogg");
+                // Staged: the UI thread puts it in place, unless "None" or another trailer
+                // was picked meanwhile.
+                let out = job.dir.join("music.ogg.auto");
                 let result = match library::snd0::trailer_audio(&trailer.stream, &out) {
                     Ok(()) => Ok(Some((out, trailer.id))),
                     Err(library::snd0::Failure::NoFfmpeg) => {
@@ -146,7 +148,8 @@ pub fn spawn_trailer_music(notifier: Notifier, jobs: Vec<MusicJob>) {
     }
 }
 
-/// The trailer picked on the Choose art screen, saved as the game's music.
+/// The trailer picked on the Choose art screen, staged as the game's music (the UI thread
+/// moves the music there before into `_previous` and puts this file in place).
 pub fn spawn_picked_trailer(
     notifier: Notifier,
     id: String,
@@ -157,14 +160,9 @@ pub fn spawn_picked_trailer(
     let spawned = std::thread::Builder::new()
         .name("picked-trailer".into())
         .spawn(move || {
-            let out = dir.join("music.ogg.new");
+            let out = dir.join("music.ogg.picked");
             let result = match library::snd0::trailer_audio(&stream, &out) {
-                Ok(()) => {
-                    let music = dir.join("music.ogg");
-                    std::fs::rename(&out, &music)
-                        .map(|()| Some((music, trailer)))
-                        .map_err(|e| e.to_string())
-                }
+                Ok(()) => Ok(Some((out, trailer))),
                 Err(library::snd0::Failure::NoFfmpeg) => Err(
                     "ffmpeg isn't installed: it's needed to take the music from a trailer".into(),
                 ),
