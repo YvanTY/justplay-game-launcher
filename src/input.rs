@@ -98,8 +98,17 @@ fn player_rank(pad: *mut SDL_Gamepad, id: u32) -> (usize, u32) {
 }
 
 fn battery(pad: *mut SDL_Gamepad) -> Option<Battery> {
+    let (state, percent) = power_info(pad);
+    battery_from(state, percent)
+}
+
+fn power_info(pad: *mut SDL_Gamepad) -> (SDL_PowerState, std::ffi::c_int) {
     let mut percent: std::ffi::c_int = -1;
     let state = unsafe { SDL_GetGamepadPowerInfo(pad, &mut percent) };
+    (state, percent)
+}
+
+fn battery_from(state: SDL_PowerState, mut percent: std::ffi::c_int) -> Option<Battery> {
     let charging = match state {
         SDL_POWERSTATE_ON_BATTERY => false,
         SDL_POWERSTATE_CHARGING => true,
@@ -187,6 +196,9 @@ fn run(emit: impl Fn(InputEvent)) {
         SDL_SetHint(SDL_HINT_JOYSTICK_ALLOW_BACKGROUND_EVENTS, c"1".as_ptr());
         // We create no SDL window, so device hotplug needs SDL's own notification thread.
         SDL_SetHint(SDL_HINT_JOYSTICK_THREAD, c"1".as_ptr());
+        // PlayStation pads on Bluetooth report their battery only in their full reports.
+        SDL_SetHint(SDL_HINT_JOYSTICK_HIDAPI_PS4, c"1".as_ptr());
+        SDL_SetHint(SDL_HINT_JOYSTICK_ENHANCED_REPORTS, c"1".as_ptr());
         if !SDL_Init(SDL_INIT_GAMEPAD) {
             emit(InputEvent::Notice(format!(
                 "Controller support failed to start: {}",
@@ -725,6 +737,10 @@ impl<F: Fn(InputEvent)> Pads<F> {
             })
             .collect();
         pads.sort_by_key(|pad| pad.rank);
+        for (&id, &pad) in &self.gamepads {
+            let (state, percent) = power_info(pad);
+            diag::log(&format!("pad {id} power: state {}, {percent}%", state.0));
+        }
         self.batteries = pads.iter().map(|p| (p.id, p.battery)).collect();
         self.batteries_read = Instant::now();
         (self.emit)(InputEvent::Pads(pads));
